@@ -12,10 +12,32 @@ use PHPUnit\Framework\TestCase;
 #[CoversClass(Logger::class)]
 final class LoggerTest extends TestCase
 {
+    /** @var resource */
+    private $buffer;
+
+    protected function setUp(): void
+    {
+        $this->buffer = fopen('php://memory', 'w+');
+        Logger::setStream($this->buffer);
+    }
+
+    protected function tearDown(): void
+    {
+        Logger::resetStream();
+        if (is_resource($this->buffer)) {
+            fclose($this->buffer);
+        }
+    }
+
+    private function captured(): string
+    {
+        rewind($this->buffer);
+        return (string) stream_get_contents($this->buffer);
+    }
+
     #[Test]
     public function move_emits_one_line_of_well_formed_json(): void
     {
-        ob_start();
         Logger::move([
             'game_id'          => 'abc-123',
             'turn'             => 47,
@@ -30,7 +52,7 @@ final class LoggerTest extends TestCase
             'own_health'       => 42,
             'own_length'       => 9,
         ]);
-        $out = (string) ob_get_clean();
+        $out = $this->captured();
 
         $this->assertStringEndsWith("\n", $out);
         $this->assertSame(1, substr_count($out, "\n"), 'must be exactly one log line');
@@ -55,15 +77,24 @@ final class LoggerTest extends TestCase
     #[Test]
     public function move_defaults_unspecified_fields(): void
     {
-        ob_start();
         Logger::move(['move' => 'down']);
-        $out = (string) ob_get_clean();
+        $decoded = json_decode(trim($this->captured()), true);
 
-        $decoded = json_decode(trim($out), true);
         $this->assertSame('down', $decoded['move']);
         $this->assertNull($decoded['game_id']);
         $this->assertNull($decoded['llm_latency_ms']);
         $this->assertSame([], $decoded['safe_moves']);
         $this->assertFalse($decoded['fallback_used']);
+    }
+
+    #[Test]
+    public function warn_emits_separate_event_type(): void
+    {
+        Logger::warn('something fishy', ['preview' => 'abc']);
+        $decoded = json_decode(trim($this->captured()), true);
+
+        $this->assertSame('warn',          $decoded['event']);
+        $this->assertSame('something fishy', $decoded['message']);
+        $this->assertSame('abc',           $decoded['context']['preview']);
     }
 }

@@ -1,5 +1,5 @@
 {
-    "name": "eamann/battlesnake-next",
+    "name": "ericmann/battlesnake-next",
     "description": "Third-generation Battlesnake competitor: PHP 8.3 + dual-LLM OpenRouter racing brain with flood-fill safety net and MCTS fallback.",
     "type": "project",
     "license": "MIT",

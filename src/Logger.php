@@ -5,15 +5,35 @@ declare(strict_types=1);
 namespace BattlesnakeAI;
 
 /**
- * One-line-of-JSON-per-event logger. Always writes to stdout via echo so
- * Docker captures it directly with no fcntl gymnastics.
+ * One-line-of-JSON-per-event logger. Writes to php://stderr (the php-fpm
+ * worker's stderr stream), which the Dockerfile points at the container's
+ * stderr and Docker captures verbatim into `docker compose logs`.
  *
- * Why echo and not error_log()? On Alpine + php-fpm + nginx, error_log goes
- * to the worker stderr stream, which Docker conflates with nginx errors and
- * makes parsing painful. Stdout is for events; stderr is for surprises.
+ * Why not echo? Under nginx + php-fpm, `echo` writes to the HTTP response
+ * body, which would leak structured log JSON into the move response sent
+ * back to the Battlesnake game engine. CLI / phpunit users see logs on
+ * stderr the same way; PHPUnit doesn't capture stderr by default, so the
+ * test suite can still observe emissions via ob_* by re-pointing the
+ * stream where it matters.
+ *
+ * Tests can swap the destination stream via setStream() to capture output.
  */
 final class Logger
 {
+    /** @var resource|null */
+    private static $stream = null;
+
+    /** @param resource $stream */
+    public static function setStream($stream): void
+    {
+        self::$stream = $stream;
+    }
+
+    public static function resetStream(): void
+    {
+        self::$stream = null;
+    }
+
     /**
      * Emit one structured /move log line.
      *
@@ -52,7 +72,7 @@ final class Logger
             'own_length'        => $data['own_length']       ?? null,
         ];
 
-        echo json_encode($line, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), "\n";
+        self::write(json_encode($line, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n");
     }
 
     /**
@@ -67,9 +87,25 @@ final class Logger
             'message' => $message,
             'context' => $context,
         ];
-        // Warnings go to stderr so they're easy to grep and don't pollute the
-        // happy-path move stream.
-        fwrite(STDERR, json_encode($line, JSON_UNESCAPED_SLASHES) . "\n");
+        // Warnings share the same stream as move events; the "event" key
+        // distinguishes them when filtering.
+        self::write(json_encode($line, JSON_UNESCAPED_SLASHES) . "\n");
+    }
+
+    private static function write(string $line): void
+    {
+        if (self::$stream !== null) {
+            fwrite(self::$stream, $line);
+            return;
+        }
+        // Default: php://stderr. Under php-fpm this routes to the worker's
+        // stderr, which the Dockerfile pipes to the container stderr that
+        // `docker compose logs` consumes.
+        $fp = fopen('php://stderr', 'w');
+        if ($fp !== false) {
+            fwrite($fp, $line);
+            fclose($fp);
+        }
     }
 
     private static function nowIso8601(): string

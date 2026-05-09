@@ -17,8 +17,8 @@ final class OpenRouterTest extends TestCase
     {
         return new OpenRouter(
             apiKey:        'sk-or-test',
-            primaryModel:  'google/gemini-2.0-flash',
-            secondaryModel:'anthropic/claude-haiku-4-5',
+            primaryModel:  'google/gemini-2.5-flash',
+            secondaryModel:'anthropic/claude-haiku-4.5',
             transport:     $transport,
             timeoutMs:     $timeoutMs,
             staggerMs:     $staggerMs,
@@ -48,7 +48,7 @@ final class OpenRouterTest extends TestCase
         $this->assertSame('up',                          $result->move);
         $this->assertSame('open',                        $result->reasoning);
         $this->assertSame('primary',                     $result->label);
-        $this->assertSame('google/gemini-2.0-flash',     $result->model);
+        $this->assertSame('google/gemini-2.5-flash',     $result->model);
         $this->assertSame(120,                           $result->latencyMs);
     }
 
@@ -64,7 +64,7 @@ final class OpenRouterTest extends TestCase
         $this->assertNotNull($result);
         $this->assertSame('right',                         $result->move);
         $this->assertSame('secondary',                     $result->label);
-        $this->assertSame('anthropic/claude-haiku-4-5',    $result->model);
+        $this->assertSame('anthropic/claude-haiku-4.5',    $result->model);
     }
 
     #[Test]

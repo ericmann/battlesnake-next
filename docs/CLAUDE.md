@@ -183,8 +183,8 @@ Copy `.env.example` to `.env` and fill in all values before running:
 ```
 OPENROUTER_API_KEY=sk-or-...
 
-PRIMARY_MODEL=google/gemini-2.0-flash
-SECONDARY_MODEL=anthropic/claude-haiku-4-5
+PRIMARY_MODEL=google/gemini-2.5-flash
+SECONDARY_MODEL=anthropic/claude-haiku-4.5
 LLM_TIMEOUT_MS=300
 STAGGER_MS=50
 

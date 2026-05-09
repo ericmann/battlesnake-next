@@ -128,9 +128,12 @@ final class CurlMultiTransport implements Transport
             CURLOPT_POST           => true,
             CURLOPT_POSTFIELDS     => $req->body,
             CURLOPT_RETURNTRANSFER => true,
-            // Connect quickly or give up — we have a strict budget.
-            CURLOPT_CONNECTTIMEOUT_MS => 100,
-            CURLOPT_TIMEOUT_MS        => 450,
+            // Connect quickly or give up — we have a strict budget. The
+            // overall wall-clock bound is enforced by race()'s loop, so the
+            // per-handle timeout just needs to be loose enough to never
+            // truncate a body that's actively arriving.
+            CURLOPT_CONNECTTIMEOUT_MS => 250,
+            CURLOPT_TIMEOUT_MS        => 5000,
             CURLOPT_HTTPHEADER     => array_map(
                 static fn(string $k, string $v): string => "$k: $v",
                 array_keys($req->headers),

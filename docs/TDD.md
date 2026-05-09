@@ -258,8 +258,8 @@ flowchart TD
 |---|---|---|
 | Web server | nginx + php-fpm | Battle-tested, predictable concurrency, no PHP extensions required |
 | Async HTTP | `curl_multi_exec` | Built into PHP, no event loop or extension needed, sufficient for 2 parallel requests |
-| LLM primary | `google/gemini-2.0-flash` | Fastest TTFT on OpenRouter (~80ms), strong ASCII spatial reasoning, cheapest |
-| LLM secondary | `anthropic/claude-haiku-4-5` | Reliable fallback, consistent JSON output, ~120ms TTFT |
+| LLM primary | `google/gemini-2.5-flash` | Fastest TTFT on OpenRouter (~80ms), strong ASCII spatial reasoning, cheapest |
+| LLM secondary | `anthropic/claude-haiku-4.5` | Reliable fallback, consistent JSON output, ~120ms TTFT |
 | Fallback | Flood-fill winner | Zero external dependencies; always terminates in < 5ms |
 | Board format | ASCII grid + metadata | LLMs handle ASCII spatial layouts well; prior art in Battlesnake community |
 | Framework | None (plain PHP + PSR-7) | App has 4 endpoints; a framework adds more overhead than value |
@@ -288,8 +288,8 @@ flowchart TD
 |---|---|---|
 | `OPENROUTER_API_KEY` | `.env` file (gitignored) | OpenRouter bearer token |
 | Tunnel token / ingress | Host `cloudflared` install (systemd, etc.) | Not passed into the snake container; managed where the daemon runs |
-| `PRIMARY_MODEL` | `.env` (with default) | Default: `google/gemini-2.0-flash` |
-| `SECONDARY_MODEL` | `.env` (with default) | Default: `anthropic/claude-haiku-4-5` |
+| `PRIMARY_MODEL` | `.env` (with default) | Default: `google/gemini-2.5-flash` |
+| `SECONDARY_MODEL` | `.env` (with default) | Default: `anthropic/claude-haiku-4.5` |
 | `LLM_TIMEOUT_MS` | `.env` (with default) | Default: `300` |
 | `SNAKE_COLOR` | `.env` (with default) | Hex color for Battlesnake UI |
 | `SNAKE_HEAD` | `.env` (with default) | Head type string |
@@ -633,7 +633,7 @@ Every `/move` call emits one JSON log line to stdout:
   "ts": "2026-05-22T14:32:01.123Z",
   "game_id": "abc-123",
   "turn": 47,
-  "model_used": "google/gemini-2.0-flash",
+  "model_used": "google/gemini-2.5-flash",
   "move": "up",
   "reasoning": "food at (3,8) reachable in 3 moves",
   "safe_moves": ["up", "right"],
