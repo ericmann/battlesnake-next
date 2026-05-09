@@ -259,6 +259,22 @@ final class Safety
     }
 
     /**
+     * Public entry point for one MCTS rollout — used by IncrementalMcts.
+     *
+     * Pulls $width / $height / enemy occupancy out of $state once per call
+     * (fast enough that recomputing it is cheaper than threading a
+     * pre-built context through every call).
+     */
+    public static function singleRollout(array $state, string $rootMove, int $depth = 20): float
+    {
+        $me     = $state['you'];
+        $board  = $state['board'];
+        $width  = (int) $board['width'];
+        $height = (int) $board['height'];
+        return self::rollout($me, $board, $width, $height, $rootMove, $depth);
+    }
+
+    /**
      * One random rollout. Returns turns survived (higher = better).
      * Enemy snakes are treated as static; food is ignored. This is the
      * panic-mode fallback — accuracy is secondary to "always returns fast".

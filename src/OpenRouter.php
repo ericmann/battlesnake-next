@@ -116,6 +116,17 @@ final readonly class OpenRouter
      */
     public function parseMove(string $body, array $safeMoves): ?string
     {
+        return self::parseMoveStatic($body, $safeMoves);
+    }
+
+    /**
+     * Static counterpart used by CurlMultiLlmDriver so the Decider doesn't
+     * need to allocate an OpenRouter instance just to parse a body.
+     *
+     * @param list<string> $safeMoves
+     */
+    public static function parseMoveStatic(string $body, array $safeMoves): ?string
+    {
         $payload = json_decode($body, true);
         if (!is_array($payload)) {
             return null;
@@ -125,11 +136,18 @@ final readonly class OpenRouter
             return null;
         }
 
-        $move = $this->extractMoveFromContent($content);
-        if ($move === null) {
+        $obj = self::decodeContentJsonStatic($content);
+        if (!is_array($obj)) {
             return null;
         }
-
+        $move = $obj['move'] ?? null;
+        if (!is_string($move)) {
+            return null;
+        }
+        $move = strtolower(trim($move));
+        if (!in_array($move, ['up', 'down', 'left', 'right'], true)) {
+            return null;
+        }
         return in_array($move, $safeMoves, true) ? $move : null;
     }
 
@@ -139,6 +157,11 @@ final readonly class OpenRouter
      */
     public function parseReasoning(string $body): string
     {
+        return self::parseReasoningStatic($body);
+    }
+
+    public static function parseReasoningStatic(string $body): string
+    {
         $payload = json_decode($body, true);
         if (!is_array($payload)) {
             return '';
@@ -147,32 +170,18 @@ final readonly class OpenRouter
         if (!is_string($content)) {
             return '';
         }
-        $obj = $this->decodeContentJson($content);
+        $obj = self::decodeContentJsonStatic($content);
         if (is_array($obj) && isset($obj['reasoning']) && is_string($obj['reasoning'])) {
             return mb_substr($obj['reasoning'], 0, 120);
         }
         return '';
     }
 
-    private function extractMoveFromContent(string $content): ?string
-    {
-        $obj = $this->decodeContentJson($content);
-        if (!is_array($obj)) {
-            return null;
-        }
-        $move = $obj['move'] ?? null;
-        if (!is_string($move)) {
-            return null;
-        }
-        $move = strtolower(trim($move));
-        return in_array($move, ['up', 'down', 'left', 'right'], true) ? $move : null;
-    }
-
     /**
      * Decode the LLM's "content" field. Per the prompt it's pure JSON, but
      * be permissive: strip ```json fences if a stubborn model adds them.
      */
-    private function decodeContentJson(string $content): mixed
+    public static function decodeContentJsonStatic(string $content): mixed
     {
         $trim = trim($content);
         if (str_starts_with($trim, '```')) {

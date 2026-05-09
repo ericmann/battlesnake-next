@@ -23,6 +23,10 @@ final class ControllerTest extends TestCase
         $_ENV['OPENROUTER_API_KEY'] = '';
         putenv('OPENROUTER_API_KEY=');
 
+        // Keep the Decider's loop tight so the test suite stays fast.
+        $_ENV['DECISION_MS'] = '30';
+        putenv('DECISION_MS=30');
+
         $this->logBuffer = fopen('php://memory', 'w+');
         Logger::setStream($this->logBuffer);
     }
@@ -96,7 +100,7 @@ final class ControllerTest extends TestCase
     }
 
     #[Test]
-    public function move_emits_log_line_with_total_latency(): void
+    public function move_emits_log_line_with_strategy_and_latency(): void
     {
         Controller::move($this->fixture());
 
@@ -104,8 +108,9 @@ final class ControllerTest extends TestCase
         $log = json_decode($line, true);
         $this->assertIsArray($log);
         $this->assertSame('move',             $log['event']);
+        $this->assertContains($log['strategy'], ['llm', 'mcts', 'flood_fill']);
         $this->assertIsInt($log['total_latency_ms']);
-        $this->assertTrue($log['fallback_used']);
+        $this->assertTrue($log['fallback_used']); // no API key set
         $this->assertNotEmpty($log['safe_moves']);
     }
 }
