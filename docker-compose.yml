@@ -1,0 +1,30 @@
+services:
+  snake:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: battlesnake-next:latest
+    container_name: battlesnake-next
+    restart: unless-stopped
+    env_file:
+      - .env
+    # Host port 9595 reserved for this snake; container nginx still listens on 9000.
+    # Bound to 127.0.0.1 only — the Cloudflare named tunnel on the host reaches in.
+    ports:
+      - "127.0.0.1:9595:9000"
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:9000/"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
