@@ -72,14 +72,15 @@ final class ControllerTest extends TestCase
     }
 
     #[Test]
-    public function move_with_valid_payload_falls_back_to_mcts_when_no_api_key(): void
+    public function move_with_valid_payload_falls_back_when_no_api_key(): void
     {
         [$status, $body] = Controller::move($this->fixture());
 
         $this->assertSame(200, $status);
         $this->assertContains($body['move'], ['up', 'down', 'left', 'right']);
-        $this->assertSame('vibes-based routing', $body['shout'] ?? null,
-            'fallback path should include the shout');
+        // Every move now carries a shout from the on-brand Shouts pool.
+        $this->assertIsString($body['shout'] ?? null);
+        $this->assertNotSame('', $body['shout']);
     }
 
     #[Test]

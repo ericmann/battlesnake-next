@@ -163,11 +163,10 @@ final class Controller
             'own_length'       => (int) ($me['length'] ?? 0),
         ]);
 
-        $body = ['move' => $move];
-        if ($fallbackUsed) {
-            $body['shout'] = 'vibes-based routing';
-        }
-        return [200, $body];
+        $context = Shouts::fromMove($move, $state, $safeMoves, $fallbackUsed);
+        $shout   = Shouts::pick($context, $turn);
+
+        return [200, ['move' => $move, 'shout' => $shout]];
     }
 
     private static function elapsedMs(int|float $startNs): int
