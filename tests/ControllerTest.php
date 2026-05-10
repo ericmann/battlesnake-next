@@ -18,14 +18,11 @@ final class ControllerTest extends TestCase
 
     protected function setUp(): void
     {
-        // Force the controller into "no LLM available" mode so we don't try
-        // to call OpenRouter from CI or developer machines without a key.
-        $_ENV['OPENROUTER_API_KEY'] = '';
-        putenv('OPENROUTER_API_KEY=');
-
         // Keep the Decider's loop tight so the test suite stays fast.
-        $_ENV['DECISION_MS'] = '30';
-        putenv('DECISION_MS=30');
+        // The MCTS-only path doesn't touch the network, so no API key dance
+        // is needed.
+        $_ENV['DECISION_MS'] = '20';
+        putenv('DECISION_MS=20');
 
         $this->logBuffer = fopen('php://memory', 'w+');
         Logger::setStream($this->logBuffer);
@@ -76,13 +73,12 @@ final class ControllerTest extends TestCase
     }
 
     #[Test]
-    public function move_with_valid_payload_falls_back_when_no_api_key(): void
+    public function move_returns_a_legal_move_with_a_shout(): void
     {
         [$status, $body] = Controller::move($this->fixture());
 
         $this->assertSame(200, $status);
         $this->assertContains($body['move'], ['up', 'down', 'left', 'right']);
-        // Every move now carries a shout from the on-brand Shouts pool.
         $this->assertIsString($body['shout'] ?? null);
         $this->assertNotSame('', $body['shout']);
     }
@@ -108,9 +104,14 @@ final class ControllerTest extends TestCase
         $log = json_decode($line, true);
         $this->assertIsArray($log);
         $this->assertSame('move',             $log['event']);
-        $this->assertContains($log['strategy'], ['llm', 'mcts', 'flood_fill']);
+        // Strategy is now strictly one of the two non-LLM options.
+        $this->assertContains($log['strategy'], ['mcts', 'flood_fill']);
         $this->assertIsInt($log['total_latency_ms']);
-        $this->assertTrue($log['fallback_used']); // no API key set
         $this->assertNotEmpty($log['safe_moves']);
+
+        // The disabled LLM path's fields must not appear in the log.
+        $this->assertArrayNotHasKey('model_used',     $log);
+        $this->assertArrayNotHasKey('llm_latency_ms', $log);
+        $this->assertArrayNotHasKey('fallback_used',  $log);
     }
 }

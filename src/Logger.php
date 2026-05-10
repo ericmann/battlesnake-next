@@ -40,14 +40,12 @@ final class Logger
      * @param array{
      *     game_id?:string,
      *     turn?:int,
-     *     model_used?:?string,
-     *     model_label?:?string,
+     *     strategy?:string,
      *     move?:string,
      *     reasoning?:string,
      *     safe_moves?:list<string>,
-     *     llm_latency_ms?:?int,
+     *     mcts_rollouts?:int,
      *     total_latency_ms?:int,
-     *     fallback_used?:bool,
      *     own_health?:int,
      *     own_length?:int,
      * } $data
@@ -55,21 +53,21 @@ final class Logger
     public static function move(array $data): void
     {
         // Order keys for human-readable scanning in `docker logs -f`.
+        // The LLM-specific fields (model_used / model_label / llm_latency_ms /
+        // fallback_used) were dropped when the OpenRouter call was disabled —
+        // they'll come back if/when we revive the LLM path against a faster
+        // vendor.
         $line = [
             'ts'                => self::nowIso8601(),
             'event'             => 'move',
             'game_id'           => $data['game_id']          ?? null,
             'turn'              => $data['turn']             ?? null,
             'strategy'          => $data['strategy']         ?? null,
-            'model_used'        => $data['model_used']       ?? null,
-            'model_label'       => $data['model_label']      ?? null,
             'move'              => $data['move']             ?? null,
             'reasoning'         => $data['reasoning']        ?? '',
             'safe_moves'        => $data['safe_moves']       ?? [],
-            'llm_latency_ms'    => $data['llm_latency_ms']   ?? null,
             'mcts_rollouts'     => $data['mcts_rollouts']    ?? 0,
             'total_latency_ms'  => $data['total_latency_ms'] ?? null,
-            'fallback_used'     => $data['fallback_used']    ?? false,
             'own_health'        => $data['own_health']       ?? null,
             'own_length'        => $data['own_length']       ?? null,
         ];

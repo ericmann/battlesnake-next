@@ -41,14 +41,12 @@ final class LoggerTest extends TestCase
         Logger::move([
             'game_id'          => 'abc-123',
             'turn'             => 47,
-            'model_used'       => 'google/gemini-2.0-flash',
-            'model_label'      => 'primary',
+            'strategy'         => 'mcts',
             'move'             => 'up',
-            'reasoning'        => 'food at (3,8)',
+            'reasoning'        => 'mcts (3120 rollouts)',
             'safe_moves'       => ['up', 'right'],
-            'llm_latency_ms'   => 187,
-            'total_latency_ms' => 203,
-            'fallback_used'    => false,
+            'mcts_rollouts'    => 3120,
+            'total_latency_ms' => 152,
             'own_health'       => 42,
             'own_length'       => 9,
         ]);
@@ -59,13 +57,20 @@ final class LoggerTest extends TestCase
 
         $decoded = json_decode(trim($out), true);
         $this->assertIsArray($decoded);
-        $this->assertSame('move',                     $decoded['event']);
-        $this->assertSame('abc-123',                  $decoded['game_id']);
-        $this->assertSame(47,                         $decoded['turn']);
-        $this->assertSame('google/gemini-2.0-flash',  $decoded['model_used']);
-        $this->assertSame('up',                       $decoded['move']);
-        $this->assertSame(['up', 'right'],            $decoded['safe_moves']);
-        $this->assertFalse($decoded['fallback_used']);
+        $this->assertSame('move',                   $decoded['event']);
+        $this->assertSame('abc-123',                $decoded['game_id']);
+        $this->assertSame(47,                       $decoded['turn']);
+        $this->assertSame('mcts',                   $decoded['strategy']);
+        $this->assertSame('up',                     $decoded['move']);
+        $this->assertSame(['up', 'right'],          $decoded['safe_moves']);
+        $this->assertSame(3120,                     $decoded['mcts_rollouts']);
+        $this->assertSame(152,                      $decoded['total_latency_ms']);
+
+        // LLM-specific fields must not leak back in.
+        $this->assertArrayNotHasKey('model_used',     $decoded);
+        $this->assertArrayNotHasKey('model_label',    $decoded);
+        $this->assertArrayNotHasKey('llm_latency_ms', $decoded);
+        $this->assertArrayNotHasKey('fallback_used',  $decoded);
 
         // ts must be ISO8601-ish UTC.
         $this->assertMatchesRegularExpression(
@@ -82,9 +87,8 @@ final class LoggerTest extends TestCase
 
         $this->assertSame('down', $decoded['move']);
         $this->assertNull($decoded['game_id']);
-        $this->assertNull($decoded['llm_latency_ms']);
         $this->assertSame([], $decoded['safe_moves']);
-        $this->assertFalse($decoded['fallback_used']);
+        $this->assertSame(0, $decoded['mcts_rollouts']);
     }
 
     #[Test]

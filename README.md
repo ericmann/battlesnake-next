@@ -17,6 +17,28 @@ flood-fill safety net... well. It was a good run.
 
 ---
 
+> ### ⚠ Current state: LLM path is dormant
+>
+> The OpenRouter dual-model brain is built, tested, and **temporarily
+> disabled**. Google Vertex EU sits at ~500 ms p50 from our deploy
+> region — already at the Battlesnake budget — so calling it can only
+> hurt us. `Controller::move()` runs MCTS-only at the moment:
+>
+> 1. `Safety::legalMoves()` — wall, body, and head-on filter (~1 ms)
+> 2. `Decider` runs MCTS for `DECISION_MS` (default **150 ms**), no
+>    `usleep`, no curl polling — every cycle is a rollout
+> 3. `flood_fill` winner from `safeMoves[0]` is the instant fallback
+>
+> **Live numbers:** ~2,200 rollouts per turn, total server response
+> 150-152 ms, leaving 350 ms of headroom for the Cloudflare tunnel hop.
+>
+> The OpenRouter classes (`OpenRouter`, `CurlMultiLlmDriver`, `Prompts`,
+> `Board`) and `.env` model config are still in the tree, just not wired
+> in. We'll revive them once we find a vendor with sub-300 ms p50 from
+> our deploy region.
+
+---
+
 ## What you are looking at
 
 A 500-line PHP 8.3 server that responds to Battlesnake's `/move` endpoint

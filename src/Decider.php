@@ -32,9 +32,12 @@ final class Decider
      * @param list<string> $safeMoves     Non-empty, sorted by flood-fill score.
      * @param int          $decisionMs    Hard cap on the decision loop in ms.
      * @param int          $sleepMicros   Per-iteration usleep. 1ms is the
-     *                                    sweet spot for curl_multi; tighter
-     *                                    starves the kernel, looser delays
-     *                                    arrival detection.
+     *                                    sweet spot when an LLM is in flight
+     *                                    (curl_multi needs the kernel to
+     *                                    actually deliver bytes). With the
+     *                                    NullLlmDriver, pass 0 to skip the
+     *                                    syscall entirely and run MCTS at
+     *                                    full CPU.
      */
     public function __construct(
         private readonly LlmDriver        $llm,
@@ -72,8 +75,11 @@ final class Decider
             }
 
             // Yield. Without this we burn 100% CPU and the kernel never
-            // gets a chance to deliver TCP segments.
-            usleep($this->sleepMicros);
+            // gets a chance to deliver TCP segments. When sleepMicros is 0
+            // (no LLM in flight) skip the syscall entirely.
+            if ($this->sleepMicros > 0) {
+                usleep($this->sleepMicros);
+            }
         }
 
         $this->llm->cancel();

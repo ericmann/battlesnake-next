@@ -9,20 +9,21 @@ namespace BattlesnakeAI;
  * [int $status, array|object $body] which index.php turns into a JSON
  * response.
  *
- * The /move handler is the hot path and runs everything inside one
- * deterministic time window:
- *
+ * /move pipeline (current):
  *   1. Parse + validate input.                     (sub-millisecond)
  *   2. Compute legal moves via Safety.             (~1 ms)
- *   3. Format the ASCII board for the LLM.         (~1 ms)
- *   4. Build the LLM driver (or NullLlmDriver).    (sub-ms)
- *   5. Decider runs ONE loop for DECISION_MS:
- *      polls LLM curl_multi each pass, runs an MCTS rollout each pass,
- *      and at the deadline picks LLM > MCTS > flood-fill.
- *   6. Log + return JSON.                          (sub-millisecond)
+ *   3. Decider runs MCTS for DECISION_MS:
+ *        - LlmDriver is hard-wired to NullLlmDriver
+ *        - Each loop iteration is one rollout, no usleep
+ *      Picks MCTS best, or flood-fill winner if no rollouts completed.
+ *   4. Log + return JSON.                          (sub-millisecond)
  *
- * The total wall-clock cost is ~DECISION_MS + ~5 ms of overhead. Tune
- * DECISION_MS in .env to fit the observed venue p95 (see LATENCY_CHECK.php).
+ * The OpenRouter / CurlMultiLlmDriver / Prompts / Board classes are still
+ * in the codebase so the LLM path can be revived when a faster vendor or
+ * a regional endpoint with sub-300ms p50 becomes available. Today the
+ * Google Vertex EU endpoint sits at ~500 ms p50 from our deploy region —
+ * which already exceeds Battlesnake's 500 ms /move budget, so calling
+ * it can only hurt us.
  */
 final class Controller
 {
@@ -66,60 +67,39 @@ final class Controller
             return [200, ['move' => 'up']];
         }
 
-        $board  = $state['board'];
         $me     = $state['you'];
         $turn   = (int) ($state['turn'] ?? 0);
         $gameId = $state['game']['id'] ?? null;
 
         // ----- 2. Safety filter -------------------------------------------
         try {
-            $safeMoves = Safety::legalMoves($me, $board);
+            $safeMoves = Safety::legalMoves($me, $state['board']);
         } catch (\Throwable $e) {
             Logger::warn('safety layer threw', ['err' => $e->getMessage()]);
             return [200, ['move' => 'up', 'shout' => 'this is fine']];
         }
 
-        // ----- 3. Render board for the LLM --------------------------------
-        $prompt = Board::format($state, $safeMoves);
-
-        // ----- 4. Build the LLM driver (or a no-op when no key) -----------
-        $apiKey = Env::str('OPENROUTER_API_KEY');
-        $hasKey = $apiKey !== '' && !str_starts_with($apiKey, 'sk-or-...');
-        $llm    = $hasKey
-            ? new CurlMultiLlmDriver(
-                apiKey:         $apiKey,
-                primaryModel:   Env::str('PRIMARY_MODEL',   'google/gemini-2.5-flash-lite'),
-                secondaryModel: Env::str('SECONDARY_MODEL', 'google/gemini-2.0-flash-lite-001'),
-                userPrompt:     $prompt,
-                safeMoves:      $safeMoves,
-                staggerMs:      Env::int('STAGGER_MS', 50),
-                appName:        Env::str('OPENROUTER_APP_NAME', 'battlesnake-next'),
-                referer:        Env::str('OPENROUTER_REFERER', 'https://snake.eamann.com'),
-            )
-            : new NullLlmDriver();
-
-        // ----- 5. Run the unified decision loop ---------------------------
+        // ----- 3. MCTS-only decision loop ---------------------------------
+        // sleepMicros = 0 means "no LLM in flight, burn the budget on
+        // rollouts". DECISION_MS sets a hard wall-clock cap (default 150).
         $decision = (new Decider(
-            llm:        $llm,
-            mcts:       new IncrementalMcts($state, $safeMoves),
-            safeMoves:  $safeMoves,
-            decisionMs: Env::int('DECISION_MS', 400),
+            llm:         new NullLlmDriver(),
+            mcts:        new IncrementalMcts($state, $safeMoves),
+            safeMoves:   $safeMoves,
+            decisionMs:  Env::int('DECISION_MS', 150),
+            sleepMicros: 0,
         ))->decide();
 
-        // ----- 6. Log + return --------------------------------------------
+        // ----- 4. Log + return --------------------------------------------
         Logger::move([
             'game_id'          => $gameId,
             'turn'             => $turn,
             'strategy'         => $decision->strategy,
-            'model_used'       => $decision->model,
-            'model_label'      => $decision->modelLabel,
             'move'             => $decision->move,
             'reasoning'        => $decision->reasoning,
             'safe_moves'       => $safeMoves,
-            'llm_latency_ms'   => $decision->llmLatencyMs,
             'mcts_rollouts'    => $decision->mctsRollouts,
             'total_latency_ms' => max($decision->totalLatencyMs, self::elapsedMs($tStart)),
-            'fallback_used'    => $decision->strategy !== 'llm',
             'own_health'       => (int) ($me['health'] ?? 0),
             'own_length'       => (int) ($me['length'] ?? 0),
         ]);
@@ -128,7 +108,7 @@ final class Controller
             $decision->move,
             $state,
             $safeMoves,
-            $decision->strategy !== 'llm',
+            $decision->strategy !== 'llm', // "llm" never set today; preserved for the revival
         );
         $shout = Shouts::pick($context, $turn);
 
