@@ -18,9 +18,12 @@ final class ControllerTest extends TestCase
 
     protected function setUp(): void
     {
+        // Force the controller into "no LLM available" mode so we don't
+        // try to hit OpenRouter from CI / dev machines without a key.
+        $_ENV['OPENROUTER_API_KEY'] = '';
+        putenv('OPENROUTER_API_KEY=');
+
         // Keep the Decider's loop tight so the test suite stays fast.
-        // The MCTS-only path doesn't touch the network, so no API key dance
-        // is needed.
         $_ENV['DECISION_MS'] = '20';
         putenv('DECISION_MS=20');
 
@@ -104,14 +107,15 @@ final class ControllerTest extends TestCase
         $log = json_decode($line, true);
         $this->assertIsArray($log);
         $this->assertSame('move',             $log['event']);
-        // Strategy is now strictly one of the two non-LLM options.
+        // No API key available in tests → we should land on MCTS or flood-fill.
         $this->assertContains($log['strategy'], ['mcts', 'flood_fill']);
         $this->assertIsInt($log['total_latency_ms']);
         $this->assertNotEmpty($log['safe_moves']);
-
-        // The disabled LLM path's fields must not appear in the log.
-        $this->assertArrayNotHasKey('model_used',     $log);
-        $this->assertArrayNotHasKey('llm_latency_ms', $log);
-        $this->assertArrayNotHasKey('fallback_used',  $log);
+        // LLM fields are present in the schema but null on the no-key path.
+        $this->assertArrayHasKey('model_used',     $log);
+        $this->assertArrayHasKey('llm_latency_ms', $log);
+        $this->assertArrayHasKey('fallback_used',  $log);
+        $this->assertNull($log['model_used']);
+        $this->assertTrue($log['fallback_used']);
     }
 }

@@ -39,6 +39,14 @@ final class CurlMultiLlmDriver implements LlmDriver
         private readonly int $staggerMs = 50,
         private readonly string $appName = 'battlesnake-next',
         private readonly string $referer = 'https://snake.eamann.com',
+        /**
+         * Optional OpenRouter provider name (e.g. "Groq", "Cerebras").
+         * When set, requests are strictly pinned to that provider with
+         * allow_fallbacks=false — the request fails fast rather than
+         * silently fanning out to a slow backend like DeepInfra.
+         * When null, OR routes wherever it likes.
+         */
+        private readonly ?string $providerPin = null,
     ) {}
 
     public function start(): void
@@ -129,7 +137,7 @@ final class CurlMultiLlmDriver implements LlmDriver
 
     private function buildHandle(string $model): \CurlHandle
     {
-        $body = (string) json_encode([
+        $payload = [
             'model'           => $model,
             'temperature'     => 0.2,
             'max_tokens'      => 60,
@@ -138,7 +146,19 @@ final class CurlMultiLlmDriver implements LlmDriver
                 ['role' => 'system', 'content' => Prompts::SYSTEM],
                 ['role' => 'user',   'content' => $this->userPrompt],
             ],
-        ], JSON_UNESCAPED_SLASHES);
+        ];
+        if ($this->providerPin !== null) {
+            // OR's strict pinning: try ONLY this provider, fail fast if it's
+            // unavailable. Without allow_fallbacks=false, OR falls back to
+            // the next-fastest healthy provider, which on Llama models
+            // means surprise visits to DeepInfra (~700-3000ms tail) when
+            // we asked for Groq (~250-400ms).
+            $payload['provider'] = [
+                'order'           => [$this->providerPin],
+                'allow_fallbacks' => false,
+            ];
+        }
+        $body = (string) json_encode($payload, JSON_UNESCAPED_SLASHES);
 
         $ch = curl_init();
         curl_setopt_array($ch, [

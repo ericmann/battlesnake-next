@@ -9,21 +9,22 @@ namespace BattlesnakeAI;
  * [int $status, array|object $body] which index.php turns into a JSON
  * response.
  *
- * /move pipeline (current):
+ * /move pipeline:
  *   1. Parse + validate input.                     (sub-millisecond)
  *   2. Compute legal moves via Safety.             (~1 ms)
- *   3. Decider runs MCTS for DECISION_MS:
- *        - LlmDriver is hard-wired to NullLlmDriver
- *        - Each loop iteration is one rollout, no usleep
- *      Picks MCTS best, or flood-fill winner if no rollouts completed.
- *   4. Log + return JSON.                          (sub-millisecond)
+ *   3. Render board ASCII for the LLM.             (~1 ms)
+ *   4. Build the LLM driver (or NullLlmDriver
+ *      when OPENROUTER_API_KEY is absent).
+ *   5. Decider runs ONE loop for DECISION_MS:
+ *        - polls LLM curl_multi each pass
+ *        - runs an MCTS rollout each pass
+ *      Picks LLM > MCTS > flood-fill at the deadline.
+ *   6. Log + return JSON.                          (sub-millisecond)
  *
- * The OpenRouter / CurlMultiLlmDriver / Prompts / Board classes are still
- * in the codebase so the LLM path can be revived when a faster vendor or
- * a regional endpoint with sub-300ms p50 becomes available. Today the
- * Google Vertex EU endpoint sits at ~500 ms p50 from our deploy region —
- * which already exceeds Battlesnake's 500 ms /move budget, so calling
- * it can only hurt us.
+ * The LLM path is pinned to a single provider (default: Groq) via
+ * `provider.allow_fallbacks=false` so we never silently fan out to a
+ * slow backend like DeepInfra. Tune DECISION_MS in .env to fit the
+ * observed venue p95 — see LATENCY_CHECK.php.
  */
 final class Controller
 {
@@ -79,27 +80,54 @@ final class Controller
             return [200, ['move' => 'up', 'shout' => 'this is fine']];
         }
 
-        // ----- 3. MCTS-only decision loop ---------------------------------
-        // sleepMicros = 0 means "no LLM in flight, burn the budget on
-        // rollouts". DECISION_MS sets a hard wall-clock cap (default 150).
+        // ----- 3. Render board for the LLM --------------------------------
+        $prompt = Board::format($state, $safeMoves);
+
+        // ----- 4. Build the LLM driver (or a no-op when no key) -----------
+        $apiKey = Env::str('OPENROUTER_API_KEY');
+        $hasKey = $apiKey !== '' && !str_starts_with($apiKey, 'sk-or-...');
+        $providerPin = Env::str('OPENROUTER_PROVIDER', 'Groq');
+        $llm = $hasKey
+            ? new CurlMultiLlmDriver(
+                apiKey:         $apiKey,
+                primaryModel:   Env::str('PRIMARY_MODEL',   'meta-llama/llama-3.3-70b-instruct'),
+                secondaryModel: Env::str('SECONDARY_MODEL', 'meta-llama/llama-3.1-8b-instruct'),
+                userPrompt:     $prompt,
+                safeMoves:      $safeMoves,
+                staggerMs:      Env::int('STAGGER_MS', 50),
+                appName:        Env::str('OPENROUTER_APP_NAME', 'battlesnake-next'),
+                referer:        Env::str('OPENROUTER_REFERER', 'https://snake.eamann.com'),
+                providerPin:    $providerPin !== '' ? $providerPin : null,
+            )
+            : new NullLlmDriver();
+
+        // ----- 5. Run the unified decision loop ---------------------------
+        // sleepMicros=1000 lets the kernel deliver TCP segments while the
+        // loop also spins MCTS rollouts. With NullLlmDriver, the Decider
+        // would still respect this — but no LLM means we'd rather burn
+        // CPU on rollouts, so drop the sleep in that case.
         $decision = (new Decider(
-            llm:         new NullLlmDriver(),
+            llm:         $llm,
             mcts:        new IncrementalMcts($state, $safeMoves),
             safeMoves:   $safeMoves,
-            decisionMs:  Env::int('DECISION_MS', 150),
-            sleepMicros: 0,
+            decisionMs:  Env::int('DECISION_MS', 450),
+            sleepMicros: $hasKey ? 1000 : 0,
         ))->decide();
 
-        // ----- 4. Log + return --------------------------------------------
+        // ----- 6. Log + return --------------------------------------------
         Logger::move([
             'game_id'          => $gameId,
             'turn'             => $turn,
             'strategy'         => $decision->strategy,
+            'model_used'       => $decision->model,
+            'model_label'      => $decision->modelLabel,
             'move'             => $decision->move,
             'reasoning'        => $decision->reasoning,
             'safe_moves'       => $safeMoves,
+            'llm_latency_ms'   => $decision->llmLatencyMs,
             'mcts_rollouts'    => $decision->mctsRollouts,
             'total_latency_ms' => max($decision->totalLatencyMs, self::elapsedMs($tStart)),
+            'fallback_used'    => $decision->strategy !== 'llm',
             'own_health'       => (int) ($me['health'] ?? 0),
             'own_length'       => (int) ($me['length'] ?? 0),
         ]);
@@ -108,7 +136,7 @@ final class Controller
             $decision->move,
             $state,
             $safeMoves,
-            $decision->strategy !== 'llm', // "llm" never set today; preserved for the revival
+            $decision->strategy !== 'llm',
         );
         $shout = Shouts::pick($context, $turn);
 

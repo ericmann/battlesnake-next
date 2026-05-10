@@ -75,25 +75,28 @@ matches how a human (or a language model) reads a grid.
 
 ---
 
-> ### ⚠ Current state: LLM path is dormant
+> ### Current brain: Llama on Groq, racing against itself
 >
-> The OpenRouter dual-model brain is built, tested, and **temporarily
-> disabled**. Google Vertex EU sits at ~500 ms p50 from our deploy
-> region — already at the Battlesnake budget — so calling it can only
-> hurt us. `Controller::move()` runs MCTS-only at the moment:
+> The first attempt routed to Google Vertex EU at ~500 ms p50 — already
+> at the Battlesnake budget. Disabling the LLM path looked inevitable
+> until we tried Groq-hosted Llama via OpenRouter's strict provider
+> pinning (`provider.allow_fallbacks = false`). The numbers came back
+> clean:
 >
-> 1. `Safety::legalMoves()` — wall, body, and head-on filter (~1 ms)
-> 2. `Decider` runs MCTS for `DECISION_MS` (default **150 ms**), no
->    `usleep`, no curl polling — every cycle is a rollout
-> 3. `flood_fill` winner from `safeMoves[0]` is the instant fallback
+> | Model                                  | p50    | p95    |
+> |----------------------------------------|--------|--------|
+> | `meta-llama/llama-3.3-70b-instruct`    | 349 ms | 419 ms |
+> | `meta-llama/llama-3.1-8b-instruct`     | 320 ms | 560 ms |
 >
-> **Live numbers:** ~2,200 rollouts per turn, total server response
-> 150-152 ms, leaving 350 ms of headroom for the Cloudflare tunnel hop.
+> Counter-intuitive but real: the **70B model is faster than the 8B**
+> on Groq, because the bottleneck is end-to-end round trip rather than
+> token generation, and the 70B's reasoning is qualitatively better
+> (it correctly chases food at low health where the 8B chases space).
 >
-> The OpenRouter classes (`OpenRouter`, `CurlMultiLlmDriver`, `Prompts`,
-> `Board`) and `.env` model config are still in the tree, just not wired
-> in. We'll revive them once we find a vendor with sub-300 ms p50 from
-> our deploy region.
+> So the live config: **primary = 70B, secondary = 8B, both pinned to
+> Groq**. The Decider runs them in parallel with MCTS rollouts during
+> the curl_multi idle window, picks LLM > MCTS > flood-fill at the
+> deadline.
 
 ---
 
