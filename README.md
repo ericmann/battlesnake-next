@@ -22,10 +22,9 @@
 
 [![CI](https://github.com/ericmann/battlesnake-next/actions/workflows/ci.yml/badge.svg)](https://github.com/ericmann/battlesnake-next/actions/workflows/ci.yml)
 [![PHP](https://img.shields.io/badge/php-8.3-777BB4?logo=php&logoColor=white)](https://www.php.net/)
-[![Release](https://img.shields.io/github/v/release/ericmann/battlesnake-next?label=release)](https://github.com/ericmann/battlesnake-next/releases)
-[![License](https://img.shields.io/github/license/ericmann/battlesnake-next)](./LICENSE)
+[![Release](https://img.shields.io/badge/release-v2026.05.09-blue)](https://github.com/ericmann/battlesnake-next/releases)
+[![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Tests](https://img.shields.io/badge/tests-51%20passing-brightgreen)](./tests)
-[![p50 latency](https://img.shields.io/badge/p50%20latency-150ms-blue)](#observability)
 
 </div>
 
