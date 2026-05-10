@@ -1,19 +1,78 @@
-# battlesnake-next
+<div align="center">
+
+# Battlesnake vNext
+
+```
+     ██████╗  █████╗ ████████╗████████╗██╗     ███████╗███████╗███╗   ██╗ █████╗ ██╗  ██╗███████╗
+     ██╔══██╗██╔══██╗╚══██╔══╝╚══██╔══╝██║     ██╔════╝██╔════╝████╗  ██║██╔══██╗██║ ██╔╝██╔════╝
+     ██████╔╝███████║   ██║      ██║   ██║     █████╗  ███████╗██╔██╗ ██║███████║█████╔╝ █████╗
+     ██╔══██╗██╔══██║   ██║      ██║   ██║     ██╔══╝  ╚════██║██║╚██╗██║██╔══██║██╔═██╗ ██╔══╝
+     ██████╔╝██║  ██║   ██║      ██║   ███████╗███████╗███████║██║ ╚████║██║  ██║██║  ██╗███████╗
+     ╚═════╝ ╚═╝  ╚═╝   ╚═╝      ╚═╝   ╚══════╝╚══════╝╚══════╝╚═╝  ╚═══╝╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝
+                                                ██╗   ██╗███╗   ██╗███████╗██╗  ██╗████████╗
+                                                ██║   ██║████╗  ██║██╔════╝╚██╗██╔╝╚══██╔══╝
+                                                ██║   ██║██╔██╗ ██║█████╗   ╚███╔╝    ██║
+                                                ╚██╗ ██╔╝██║╚██╗██║██╔══╝   ██╔██╗    ██║
+                                                 ╚████╔╝ ██║ ╚████║███████╗██╔╝ ██╗   ██║
+                                                  ╚═══╝  ╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝   ╚═╝
+```
+
+***A third-generation Battlesnake competitor from the Mann lab.***
+*Built in PHP 8.3. Verified to decide a move in 150 ms. Two trophies on the shelf and counting.*
+
+[![CI](https://github.com/ericmann/battlesnake-next/actions/workflows/ci.yml/badge.svg)](https://github.com/ericmann/battlesnake-next/actions/workflows/ci.yml)
+[![PHP](https://img.shields.io/badge/php-8.3-777BB4?logo=php&logoColor=white)](https://www.php.net/)
+[![Release](https://img.shields.io/github/v/release/ericmann/battlesnake-next?label=release)](https://github.com/ericmann/battlesnake-next/releases)
+[![License](https://img.shields.io/github/license/ericmann/battlesnake-next)](./LICENSE)
+[![Tests](https://img.shields.io/badge/tests-51%20passing-brightgreen)](./tests)
+[![p50 latency](https://img.shields.io/badge/p50%20latency-150ms-blue)](#observability)
+
+</div>
+
+---
 
 > **Genus:** *Serpens elegantissima*
 > **Habitat:** PHP-Fpm. Conference WiFi. Cloudflare Tunnels.
 > **Diet:** Hexagonal pellets. Smaller snakes. The hopes of the bracket.
 > **Conservation status:** Apex.
 
-The third-generation Battlesnake from the Mann lab. The previous two animals
-in this lineage have a perfect record at PHP conferences — the v1 specimen
-swept Cascadia PHP, the v2 specimen swept PHP Tek (with v1 finishing as
-runner-up, because of course it did). This one is built to continue the
-streak. It has opinions about your snake. They are not generous opinions.
+The previous two animals in this lineage have a perfect record at PHP
+conferences — the v1 specimen swept Cascadia PHP, the v2 specimen swept
+PHP Tek (with v1 finishing as runner-up, because of course it did). This
+one is built to continue the streak. It has opinions about your snake.
+They are not generous opinions.
 
 If you are reading this and your snake is **not** a third-generation
 PHP-fpm-and-curl-multi competitor with a dual-LLM racing brain and a
 flood-fill safety net... well. It was a good run.
+
+### What the snake actually sees
+
+Mid-game, mid-tournament, mid-decision — this is the world the snake
+gets handed every 500 ms:
+
+```
+10│ .  .  .  .  .  .  .  .  .  .  .         ┌──────────────────────────────┐
+ 9│ .  .  .  .  .  .  .  .  .  .  .         │ Turn 47   Health 32   Len 6  │
+ 8│ .  .  F  .  .  .  .  .  s  s  t         │                              │
+ 7│ .  .  .  .  .  .  .  .  e+ .  .         │ Legal moves (sorted by space)│
+ 6│ .  .  .  .  H  .  .  .  .  .  .         │   1. up                      │
+ 5│ .  .  e- .  B  F  .  .  .  .  .         │   2. right                   │
+ 4│ .  .  s  .  B  B  B  .  .  .  .         │   3. left                    │
+ 3│ .  .  s  s  .  .  T  .  .  .  .         │                              │
+ 2│ X  X  .  s  .  .  .  .  .  .  .         │ Strategy : MCTS              │
+ 1│ X  X  .  s  s  t  .  .  .  F  .         │ Rollouts : 2,214             │
+ 0│ X  X  .  .  .  .  .  .  .  .  .         │ Latency  : 150 ms            │
+   └─────────────────────────────────        └──────────────────────────────┘
+     0  1  2  3  4  5  6  7  8  9  10
+```
+
+`H` is the snake's head, `B` its body, `T` its tail. `e+` / `e=` / `e-`
+are enemy heads tagged by length relative to ours: kill, mutual death,
+or run away. `F` is food, `X` is hazard sauce, `.` is open space.
+
+The y-axis is flipped on render so up on the page is up on the board —
+matches how a human (or a language model) reads a grid.
 
 ---
 
@@ -185,39 +244,13 @@ to die *gracefully*.
 
 ### The board renderer
 
-`src/Board.php::format()` turns the JSON payload into ASCII the LLM can
-actually reason about:
-
-```
-10| .  .  .  .  .  .  .  .  .  .  .
- 9| .  .  .  .  .  .  .  .  .  .  .
- 8| .  .  F  .  .  .  .  .  s  s  t
- 7| .  .  .  .  .  .  .  .  e+ .  .
- 6| .  .  .  .  H  .  .  .  .  .  .
- 5| .  .  e- .  B  F  .  .  .  .  .
- 4| .  .  s  .  B  B  B  .  .  .  .
- 3| .  .  s  s  .  .  T  .  .  .  .
- 2| X  X  .  s  .  .  .  .  .  .  .
- 1| X  X  .  s  s  t  .  .  .  F  .
- 0| X  X  .  .  .  .  .  .  .  .  .
-   +---------------------------------
-     0  1  2  3  4  5  6  7  8  9  10
-
-Turn: 47   Board: 11x11
-You: length=6  health=32  head=(4,6)  tail=(6,3)  facing=up
-Enemies:
-  - lil-fang: length=4  health=80  head=(8,7)
-  - constrictor-prime: length=8  health=95  head=(2,5)
-Food on board: 3   Hazards: 6
-Legal moves (pre-filtered, sorted by open space): up, right, left
-```
-
-The y-axis is flipped on render so the top of the page is the top of
-the board (the high-y row). Enemy heads are tagged `e+` / `e=` / `e-`
-to indicate whether they're shorter than us (a head-on kill in our
-favor), equal length (mutual death), or longer (we lose). The metadata
-block lists pre-filtered legal moves so the LLM doesn't waste tokens
-considering fatal options.
+`src/Board.php::format()` produces the ASCII grid shown at the top of
+this README, plus a metadata block listing turn / health / length / head
+position / facing direction / pre-filtered legal moves. It exists to
+feed the (currently dormant) LLM brain something it can reason about
+spatially. The y-axis is flipped on output so up on the page is up on
+the board, which dramatically helps both human debugging and any model
+asked to interpret the layout.
 
 ### The shouts
 
