@@ -347,6 +347,101 @@ final class SafetyTest extends TestCase
     }
 
     #[Test]
+    public function legalMovesWithSpace_seeks_food_when_hungry(): void
+    {
+        // Solo snake at low health with food two cells up. Hunger weight
+        // dominates; the food bonus must push 'up' above the lateral moves
+        // (which would tie on raw area in an otherwise empty board).
+        $me = $this->snake('me', [
+            ['x' => 5, 'y' => 5],
+            ['x' => 5, 'y' => 4],
+            ['x' => 5, 'y' => 3],
+        ], health: 10);
+        $board = $this->board([$me], food: [['x' => 5, 'y' => 8]]);
+
+        $scored = Safety::legalMovesWithSpace($me, $board);
+
+        $this->assertSame('up', array_key_first($scored),
+            'hunger weight must push the food-direction to the top');
+    }
+
+    #[Test]
+    public function legalMovesWithSpace_ignores_food_when_long_and_healthy(): void
+    {
+        // U-shaped snake with a 1-cell pocket on 'down' and open board on
+        // the 'up' / 'right' (tail) side. Food sits inside the pocket.
+        // Healthy + already long ⇒ food weight is zero, so the ranker
+        // should not be tricked into the trap by the food.
+        $me = $this->snake('me', [
+            ['x' => 5, 'y' => 5], // head
+            ['x' => 4, 'y' => 5],
+            ['x' => 4, 'y' => 4],
+            ['x' => 4, 'y' => 3],
+            ['x' => 5, 'y' => 3],
+            ['x' => 6, 'y' => 3],
+            ['x' => 6, 'y' => 4],
+            ['x' => 6, 'y' => 5], // tail
+        ], health: 100);
+        $board = $this->board([$me], food: [['x' => 5, 'y' => 4]]); // inside the pocket
+
+        $scored = Safety::legalMovesWithSpace($me, $board);
+
+        $this->assertArrayHasKey('down', $scored);
+        $this->assertSame(1, $scored['down'], 'down should still register as the 1-cell pocket');
+        $this->assertNotSame('down', array_key_first($scored),
+            'healthy long snake must not be lured into the 1-cell pocket by the food inside it');
+    }
+
+    #[Test]
+    public function rollout_restores_health_and_survives_when_eating_food_while_starving(): void
+    {
+        // Health=3 snake walks directly onto a food cell. Without food
+        // handling the snake would starve in ~3 turns (score ≈ 3). With
+        // food handling, the snake eats, health resets to 100, and the
+        // rollout runs to depth (score ≈ depth).
+        $me = $this->snake('me', [
+            ['x' => 5, 'y' => 5],
+            ['x' => 5, 'y' => 4],
+            ['x' => 5, 'y' => 3],
+        ], health: 3);
+        $state = [
+            'turn'  => 0,
+            'board' => $this->board([$me], food: [['x' => 5, 'y' => 6]]),
+            'you'   => $me,
+        ];
+
+        mt_srand(1);
+        $score = Safety::singleRollout($state, 'up', 15);
+
+        $this->assertGreaterThan(10.0, $score,
+            'rollout must eat the food and survive when a starving snake walks onto it');
+    }
+
+    #[Test]
+    public function rollout_starves_when_no_food_and_low_health(): void
+    {
+        // Same low health, but no food at all. Snake should die from
+        // starvation within a handful of turns regardless of which legal
+        // move we pick as root.
+        $me = $this->snake('me', [
+            ['x' => 5, 'y' => 5],
+            ['x' => 5, 'y' => 4],
+            ['x' => 5, 'y' => 3],
+        ], health: 3);
+        $state = [
+            'turn'  => 0,
+            'board' => $this->board([$me]),
+            'you'   => $me,
+        ];
+
+        mt_srand(1);
+        $score = Safety::singleRollout($state, 'up', 25);
+
+        $this->assertLessThan(5.0, $score,
+            'starving snake with no food must die within ~3 turns of starvation');
+    }
+
+    #[Test]
     public function legalMovesWithSpace_rewards_contesting_against_equal_enemy(): void
     {
         // Against an equal-length enemy, area control rewards advancing

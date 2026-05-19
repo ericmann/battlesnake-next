@@ -59,15 +59,28 @@ final class Safety
      *
      * Score is the number of cells my head reaches strictly before any enemy
      * head in a multi-source BFS (see areaControl). In a solo game this is
-     * identical to the older floodFill-based score — only when enemies exist
-     * does the score differ, by attributing contested cells to whoever wins
-     * the race.
+     * identical to the older floodFill-based score.
      *
-     * @return array<string,int> Map of direction → area-control score, sorted
-     *                           descending. Guaranteed non-empty. When every
-     *                           move is fatal, the single entry has score 0 —
-     *                           caller can detect "everything is dead" without
-     *                           a separate flag.
+     * **Ordering** of the returned map is by a *combined* score that adds a
+     * food-seeking bonus on top of the raw area, weighted by hunger and
+     * length deficit:
+     *
+     *   - hunger weight ramps from 0 at health ≥ 60 to 1 at health 0
+     *   - length-deficit weight ramps from 0 when we're ≥2 longer than the
+     *     longest enemy to 1 when we're 5 behind
+     *   - the weights are combined as max() so a healthy-but-tiny snake
+     *     still seeks growth and a long-but-starving snake still seeks food
+     *   - bonus contribution per food = weight × FOOD_BONUS / (dist + 1),
+     *     summed for fast falloff (closer food matters disproportionately)
+     *
+     * The map's **values** stay the raw area-control score so the Decider
+     * sanity gate continues to detect 1-cell pockets correctly — only the
+     * ranking order is food-adjusted.
+     *
+     * @return array<string,int> Map of direction → raw area-control score,
+     *                           sorted descending by combined ranking.
+     *                           Guaranteed non-empty. When every move is
+     *                           fatal, the single entry has score 0.
      */
     public static function legalMovesWithSpace(array $me, array $board): array
     {
@@ -76,6 +89,7 @@ final class Safety
         $head   = $me['head'];
         $myLen  = (int) $me['length'];
         $myId   = $me['id'] ?? null;
+        $myHealth = (int) ($me['health'] ?? 100);
 
         // Build the occupancy map for "next turn": a set of cells we cannot
         // safely enter. Every snake's body except the tail is blocked. The
@@ -83,6 +97,7 @@ final class Safety
         // != tail-segment-count means the tail just grew — careful).
         $blocked = [];
         $enemies = [];
+        $maxEnemyLen = 0;
         foreach ($board['snakes'] as $snake) {
             $body = $snake['body'];
             $segCount = count($body);
@@ -103,6 +118,7 @@ final class Safety
                     'y'      => (int) $snake['head']['y'],
                     'length' => (int) $snake['length'],
                 ];
+                $maxEnemyLen = max($maxEnemyLen, (int) $snake['length']);
             }
         }
 
@@ -148,9 +164,107 @@ final class Safety
             return [($fallback ?? 'up') => 0];
         }
 
-        // Sort descending by area-control score. Stable order on ties is fine.
-        arsort($candidates);
-        return $candidates;
+        // Compute the food-seeking weight. Zero out the bonus entirely if
+        // both conditions are healthy.
+        $hungerWeight = max(0.0, (60.0 - $myHealth) / 60.0);
+        $lengthDeficitWeight = max(0.0, ($maxEnemyLen + 2 - $myLen) / 5.0);
+        $foodWeight = max($hungerWeight, $lengthDeficitWeight);
+        $foodWeight = min(1.0, $foodWeight);
+
+        $foodCells = $board['food'] ?? [];
+        $combined = $candidates; // start from raw area, optionally add food bonus
+        if ($foodWeight > 0.0 && $foodCells !== []) {
+            $foodDistance = self::multiSourceBfsDistances($foodCells, $blocked, $width, $height);
+            foreach ($candidates as $dir => $area) {
+                [$dx, $dy] = self::DIRECTIONS[$dir];
+                $nx = (int) $head['x'] + $dx;
+                $ny = (int) $head['y'] + $dy;
+                $dist = $foodDistance[self::key($nx, $ny)] ?? null;
+                if ($dist === null) {
+                    continue; // food unreachable from this direction
+                }
+                // Bonus shrinks fast with distance — a food at the next cell
+                // matters far more than one 10 cells away. FOOD_BONUS sets
+                // the maximum contribution when both weight and proximity
+                // are maxed out.
+                $bonus = $foodWeight * (self::FOOD_BONUS / ($dist + 1.0));
+                $combined[$dir] = $area + $bonus;
+            }
+        }
+
+        // Sort by the combined score. Then return the raw-area map in that
+        // order — that way Board renders raw cells (which the LLM
+        // interprets correctly) and the Decider's sanity gate keeps its
+        // pocket-detection ratio.
+        arsort($combined);
+        $result = [];
+        foreach (array_keys($combined) as $dir) {
+            $result[$dir] = $candidates[$dir];
+        }
+        return $result;
+    }
+
+    /**
+     * Maximum food contribution to the ranking when both food weight and
+     * proximity are saturated. Tuned so a candidate next to food while
+     * starving overcomes a ~15-cell area difference, but a healthy snake
+     * with low foodWeight sees ~0 bonus.
+     */
+    private const FOOD_BONUS = 30.0;
+
+    /**
+     * Multi-source BFS from every food cell, returning the distance from
+     * the nearest food to every reachable cell on the board. Used by the
+     * ranker to score food proximity per candidate.
+     *
+     * @param list<array{x:int,y:int}> $foodCells
+     * @param array<string,bool>       $blocked   Same shape as floodFill/areaControl.
+     * @return array<string,int>                   Cell key → BFS distance.
+     */
+    private static function multiSourceBfsDistances(array $foodCells, array $blocked, int $width, int $height): array
+    {
+        $dist = [];
+        $frontier = [];
+        foreach ($foodCells as $f) {
+            $fx = (int) $f['x'];
+            $fy = (int) $f['y'];
+            if ($fx < 0 || $fx >= $width || $fy < 0 || $fy >= $height) {
+                continue;
+            }
+            $k = self::key($fx, $fy);
+            // Food cells are technically standalone — they sit on otherwise
+            // open cells, but if the engine put one inside a body cell
+            // (royale spawn quirks) we still seed the BFS from there. The
+            // BFS won't escape into blocked neighbours, so dirty starts are
+            // self-healing.
+            if (isset($dist[$k])) {
+                continue;
+            }
+            $dist[$k] = 0;
+            $frontier[] = [$fx, $fy];
+        }
+        $d = 0;
+        while ($frontier !== []) {
+            $next = [];
+            foreach ($frontier as [$x, $y]) {
+                foreach (self::DIRECTIONS as [$dx, $dy]) {
+                    $nx = $x + $dx;
+                    $ny = $y + $dy;
+                    if ($nx < 0 || $nx >= $width || $ny < 0 || $ny >= $height) {
+                        continue;
+                    }
+                    $k = self::key($nx, $ny);
+                    if (isset($dist[$k]) || isset($blocked[$k])) {
+                        continue;
+                    }
+                    $dist[$k] = $d + 1;
+                    $next[] = [$nx, $ny];
+                }
+            }
+            $frontier = $next;
+            $d++;
+        }
+        return $dist;
     }
 
     /**
@@ -446,27 +560,37 @@ final class Safety
     }
 
     /**
-     * Enemy-aware random rollout. Returns a score where higher = better.
+     * Enemy-aware random rollout with health/food/hazard tracking. Returns
+     * a score where higher = better.
      *
-     * Each turn every still-alive snake (mine + enemies) picks a uniformly
-     * random legal move. After all moves are picked we resolve head-on
-     * collisions by length: longer wins, equal lengths kill both. Score is
-     * the turn count I survive from the root move forward, plus a kill
-     * bonus for each enemy that died during the rollout (no-escape or
-     * losing a head-on against me).
+     * Each turn every still-alive snake (mine + enemies) picks a legal move
+     * (mine random with predictive head-on filtering; enemies 50/50 chase-
+     * me / random). Health decays by 1 per turn, +15 inside a hazard cell.
+     * Landing on food restores health to 100, grows the snake by one
+     * segment (tail does not pop that turn), and removes the food from the
+     * board. Hitting zero health kills the snake.
      *
-     * Modelling enemies as moving — even with a dumb random policy — is
-     * what lets MCTS detect traps that develop over several turns: a longer
-     * enemy at distance 3 sometimes picks the move that closes to distance
-     * 2, then 1, then forces a head-on. Random sampling averages those
-     * lines into a lower expected score for advances toward longer snakes.
+     * After moves resolve, killshot detection (area < length) and head-on
+     * collisions (longer wins, equal both die) finalise the turn. Score is
+     * turns survived from the root move forward plus a kill bonus for each
+     * enemy that died (no-escape, starvation, head-on loss, or killshot).
+     *
+     * Modelling food + health is what lets MCTS see "if I take this
+     * direction I will starve before reaching food" — without it, rollouts
+     * happily run to depth even while the real snake would die of
+     * health=0. Modelling enemies as movers (the change from the previous
+     * commit) is what lets it see multi-turn traps.
      */
     private static function rollout(array $me, array $board, int $width, int $height, string $rootMove, int $depth): float
     {
-        $myId   = $me['id'] ?? null;
-        $myBody = array_map(static fn(array $c): array => [(int) $c['x'], (int) $c['y']], $me['body']);
+        $myId = $me['id'] ?? null;
+        $mySnake = [
+            'body'   => array_map(static fn(array $c): array => [(int) $c['x'], (int) $c['y']], $me['body']),
+            'length' => (int) $me['length'],
+            'health' => (int) ($me['health'] ?? 100),
+        ];
 
-        /** @var list<array{body:list<array{0:int,1:int}>,length:int,id:string}> */
+        /** @var list<array{body:list<array{0:int,1:int}>,length:int,health:int,id:string}> */
         $enemies = [];
         foreach ($board['snakes'] as $snake) {
             if (($snake['id'] ?? null) === $myId) {
@@ -475,14 +599,26 @@ final class Safety
             $enemies[] = [
                 'body'   => array_map(static fn(array $c): array => [(int) $c['x'], (int) $c['y']], $snake['body']),
                 'length' => (int) $snake['length'],
+                'health' => (int) ($snake['health'] ?? 100),
                 'id'     => (string) ($snake['id'] ?? spl_object_hash((object) $snake)),
             ];
+        }
+
+        // Mutable sets for food + hazards. Food is consumed during the
+        // rollout; hazards persist for the whole window.
+        $food = [];
+        foreach ($board['food'] ?? [] as $f) {
+            $food[self::key((int) $f['x'], (int) $f['y'])] = true;
+        }
+        $hazards = [];
+        foreach ($board['hazards'] ?? [] as $h) {
+            $hazards[self::key((int) $h['x'], (int) $h['y'])] = true;
         }
 
         // Apply the root move first. Use a static occupancy here — enemies
         // haven't moved yet relative to the engine's current frame.
         $staticEnemyOcc = self::occupancyOfAll($enemies, includeTails: false);
-        if (!self::stepSelf($myBody, $rootMove, $width, $height, $staticEnemyOcc)) {
+        if (!self::stepSnake($mySnake, $rootMove, $width, $height, $staticEnemyOcc, $food, $hazards)) {
             return 0.0;
         }
 
@@ -504,8 +640,8 @@ final class Safety
             //    Use mt_rand instead of random_int — rollouts don't need
             //    cryptographic randomness and random_int dominates the
             //    per-call cost.
-            $myHead = $myBody[0];
-            $myOcc = self::occupancyOfSelf($myBody, includeTail: false);
+            $myHead = $mySnake['body'][0];
+            $myOcc = self::occupancyOfSelf($mySnake['body'], includeTail: false);
             $newEnemies = [];
             foreach ($enemies as $i => $e) {
                 $otherEnemyOcc = self::occupancyOfAll($enemies, includeTails: false, except: $i);
@@ -534,8 +670,8 @@ final class Safety
                 } else {
                     $pick = $legal[mt_rand(0, count($legal) - 1)];
                 }
-                if (!self::stepSelf($e['body'], $pick, $width, $height, $combined)) {
-                    $kills++; // illegal move means they died on the way
+                if (!self::stepSnake($e, $pick, $width, $height, $combined, $food, $hazards)) {
+                    $kills++; // illegal move OR starvation → dies
                     continue;
                 }
 
@@ -543,16 +679,9 @@ final class Safety
                 // their new head. If their reachable area is smaller than
                 // their length, they can't fit their own body and are
                 // imminently dead — credit the kill now and drop them from
-                // the rollout. This is the aggression signal: setup moves
-                // that pinch an enemy's reachable space below their length
-                // will accumulate kill credit in rollouts, so MCTS prefers
-                // them over equally-safe non-setup moves.
+                // the rollout.
                 $eHead = ['x' => $e['body'][0][0], 'y' => $e['body'][0][1]];
                 $blockedForE = $combined;
-                // Add the enemy's *own* body (minus head and minus tail) as
-                // obstacles. $combined excludes this enemy (because we used
-                // except:$i above), so we need to add their newly-stepped
-                // body for the area calc.
                 $eSegs = count($e['body']);
                 for ($j = 1; $j < $eSegs - 1; $j++) {
                     $blockedForE[self::key($e['body'][$j][0], $e['body'][$j][1])] = true;
@@ -571,8 +700,8 @@ final class Safety
             //    blocked cell here (enemy head is in occupancy + longer);
             //    head-on with a shorter enemy is allowed and resolved below.
             [$myLegal, $headOnTargets] = self::legalSelfMovesWithHeadOnTargets(
-                $myBody,
-                count($myBody),
+                $mySnake['body'],
+                $mySnake['length'],
                 $enemies,
                 $width,
                 $height,
@@ -582,13 +711,15 @@ final class Safety
             }
             $pick = $myLegal[mt_rand(0, count($myLegal) - 1)];
 
-            // 3. Step me. The destination might be an enemy head we can
-            //    legally take — in that case we kill them and proceed.
+            // 3. Step me. Need to compute the destination before stepping
+            //    because stepSnake will mutate the body.
             [$dx, $dy] = self::DIRECTIONS[$pick];
-            $nx = $myBody[0][0] + $dx;
-            $ny = $myBody[0][1] + $dy;
-            $tail = array_pop($myBody);
-            array_unshift($myBody, [$nx, $ny]);
+            $nx = $mySnake['body'][0][0] + $dx;
+            $ny = $mySnake['body'][0][1] + $dy;
+            $allEnemyOcc = self::occupancyOfAll($enemies, includeTails: false);
+            if (!self::stepSnake($mySnake, $pick, $width, $height, $allEnemyOcc, $food, $hazards)) {
+                break; // I died (collision, head-on, or starvation)
+            }
 
             $targetKey = self::key($nx, $ny);
             if (isset($headOnTargets[$targetKey])) {
@@ -606,11 +737,11 @@ final class Safety
             $iDied = false;
             $newEnemies = [];
             foreach ($enemies as $e) {
-                if ($e['body'][0][0] === $myBody[0][0] && $e['body'][0][1] === $myBody[0][1]) {
-                    if ($e['length'] >= count($myBody)) {
+                if ($e['body'][0][0] === $mySnake['body'][0][0] && $e['body'][0][1] === $mySnake['body'][0][1]) {
+                    if ($e['length'] >= $mySnake['length']) {
                         $iDied = true;
                     }
-                    if ($e['length'] <= count($myBody)) {
+                    if ($e['length'] <= $mySnake['length']) {
                         $kills++;
                         continue; // they die
                     }
@@ -628,36 +759,67 @@ final class Safety
     }
 
     /**
-     * Mutates $body in place: prepend the new head, drop the tail.
-     * Returns false if the move is illegal (hit wall / body / blocked cell).
+     * Mutates $snake in place: applies one move, updates body, health, and
+     * length, consuming food / taking hazard damage as appropriate. Returns
+     * false if the snake died — walls, body collisions, or health hitting
+     * zero are all reported as failure.
      *
-     * @param array<string,bool> $blocked Cells that count as obstacles (enemy
-     *                                    bodies in the static case, or all-snakes
-     *                                    bodies in the enemy-aware rollout case).
+     * @param array{body:list<array{0:int,1:int}>,length:int,health:int} $snake
+     * @param array<string,bool>                                          $blocked  Other snakes' bodies (minus their tails).
+     * @param array<string,bool>                                          $food     Mutable set: this snake removes any food it eats.
+     * @param array<string,bool>                                          $hazards  Static set of hazard cells.
      */
-    private static function stepSelf(array &$body, string $move, int $width, int $height, array $blocked): bool
-    {
+    private static function stepSnake(
+        array &$snake,
+        string $move,
+        int $width,
+        int $height,
+        array $blocked,
+        array &$food,
+        array $hazards
+    ): bool {
         [$dx, $dy] = self::DIRECTIONS[$move];
-        [$hx, $hy] = $body[0];
+        [$hx, $hy] = $snake['body'][0];
         $nx = $hx + $dx;
         $ny = $hy + $dy;
 
         if ($nx < 0 || $nx >= $width || $ny < 0 || $ny >= $height) {
             return false;
         }
-        if (isset($blocked[self::key($nx, $ny)])) {
+        $newKey = self::key($nx, $ny);
+        if (isset($blocked[$newKey])) {
             return false;
         }
-        // Tail vacates this same turn (we're not tracking food in the rollout),
-        // so the cell occupied by body[count-1] becomes empty.
-        $tail = array_pop($body);
-        foreach ($body as [$bx, $by]) {
+
+        $ate = isset($food[$newKey]);
+        if ($ate) {
+            // Eat: remove food, restore health, grow by one (tail does not
+            // pop this turn — body just gets a new head).
+            unset($food[$newKey]);
+            array_unshift($snake['body'], [$nx, $ny]);
+            $snake['length']++;
+            $snake['health'] = 100;
+            return true;
+        }
+
+        // Normal step: pop tail, prepend head, decay health.
+        $tail = array_pop($snake['body']);
+        // Body-collision check (excluding the tail we just popped, since it
+        // vacates the same turn).
+        foreach ($snake['body'] as [$bx, $by]) {
             if ($bx === $nx && $by === $ny) {
-                $body[] = $tail; // restore for caller correctness
+                $snake['body'][] = $tail; // restore for caller correctness
                 return false;
             }
         }
-        array_unshift($body, [$nx, $ny]);
+        array_unshift($snake['body'], [$nx, $ny]);
+        $snake['health']--;
+        if (isset($hazards[$newKey])) {
+            $snake['health'] -= 15;
+        }
+        if ($snake['health'] <= 0) {
+            return false; // starved
+        }
         return true;
     }
 
