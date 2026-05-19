@@ -446,50 +446,172 @@ final class Safety
     }
 
     /**
-     * One random rollout. Returns turns survived (higher = better).
-     * Enemy snakes are treated as static; food is ignored. This is the
-     * panic-mode fallback — accuracy is secondary to "always returns fast".
+     * Enemy-aware random rollout. Returns a score where higher = better.
+     *
+     * Each turn every still-alive snake (mine + enemies) picks a uniformly
+     * random legal move. After all moves are picked we resolve head-on
+     * collisions by length: longer wins, equal lengths kill both. Score is
+     * the turn count I survive from the root move forward, plus a kill
+     * bonus for each enemy that died during the rollout (no-escape or
+     * losing a head-on against me).
+     *
+     * Modelling enemies as moving — even with a dumb random policy — is
+     * what lets MCTS detect traps that develop over several turns: a longer
+     * enemy at distance 3 sometimes picks the move that closes to distance
+     * 2, then 1, then forces a head-on. Random sampling averages those
+     * lines into a lower expected score for advances toward longer snakes.
      */
     private static function rollout(array $me, array $board, int $width, int $height, string $rootMove, int $depth): float
     {
+        $myId   = $me['id'] ?? null;
         $myBody = array_map(static fn(array $c): array => [(int) $c['x'], (int) $c['y']], $me['body']);
-        // Enemy bodies are frozen; precompute their occupancy once.
-        $enemyOcc = [];
+
+        /** @var list<array{body:list<array{0:int,1:int}>,length:int,id:string}> */
+        $enemies = [];
         foreach ($board['snakes'] as $snake) {
-            if (($snake['id'] ?? null) === ($me['id'] ?? null)) {
+            if (($snake['id'] ?? null) === $myId) {
                 continue;
             }
-            foreach ($snake['body'] as $seg) {
-                $enemyOcc[self::key((int) $seg['x'], (int) $seg['y'])] = true;
-            }
+            $enemies[] = [
+                'body'   => array_map(static fn(array $c): array => [(int) $c['x'], (int) $c['y']], $snake['body']),
+                'length' => (int) $snake['length'],
+                'id'     => (string) ($snake['id'] ?? spl_object_hash((object) $snake)),
+            ];
         }
 
-        // Apply the root move first.
-        if (!self::stepSelf($myBody, $rootMove, $width, $height, $enemyOcc)) {
+        // Apply the root move first. Use a static occupancy here — enemies
+        // haven't moved yet relative to the engine's current frame.
+        $staticEnemyOcc = self::occupancyOfAll($enemies, includeTails: false);
+        if (!self::stepSelf($myBody, $rootMove, $width, $height, $staticEnemyOcc)) {
             return 0.0;
         }
 
         $survived = 1;
+        $kills    = 0;
+        $killBonus = 10.0; // a kill is worth ten turns of survival
+
         for ($t = 1; $t < $depth; $t++) {
-            $legal = self::legalSelfMoves($myBody, $width, $height, $enemyOcc);
-            if ($legal === []) {
+            // 1. Enemies pick moves based on the pre-move state. Policy is a
+            //    50/50 mix of "chase me" (pick the legal move that minimises
+            //    Manhattan distance to my head) and "random legal" — pure
+            //    random doesn't apply enough pressure to surface multi-turn
+            //    traps; pure chase is too pessimistic and would have us flee
+            //    every encounter. The mix gives MCTS enough adversarial
+            //    signal to mark "advancing toward a longer snake" as
+            //    statistically dangerous without making every game
+            //    feel like the enemy is psychic.
+            //
+            //    Use mt_rand instead of random_int — rollouts don't need
+            //    cryptographic randomness and random_int dominates the
+            //    per-call cost.
+            $myHead = $myBody[0];
+            $myOcc = self::occupancyOfSelf($myBody, includeTail: false);
+            $newEnemies = [];
+            foreach ($enemies as $i => $e) {
+                $otherEnemyOcc = self::occupancyOfAll($enemies, includeTails: false, except: $i);
+                $combined = $myOcc + $otherEnemyOcc;
+                $legal = self::legalSelfMoves($e['body'], $width, $height, $combined);
+                if ($legal === []) {
+                    $kills++; // enemy has nowhere to go → dies trapped
+                    continue;
+                }
+                if (mt_rand(0, 1) === 0) {
+                    // Chase: pick the legal move that minimises Manhattan
+                    // distance to my head. Tie-break by iteration order
+                    // (stable, doesn't matter which one).
+                    $pick = $legal[0];
+                    $bestDist = PHP_INT_MAX;
+                    foreach ($legal as $dir) {
+                        [$dx, $dy] = self::DIRECTIONS[$dir];
+                        $nx = $e['body'][0][0] + $dx;
+                        $ny = $e['body'][0][1] + $dy;
+                        $d = abs($nx - $myHead[0]) + abs($ny - $myHead[1]);
+                        if ($d < $bestDist) {
+                            $bestDist = $d;
+                            $pick = $dir;
+                        }
+                    }
+                } else {
+                    $pick = $legal[mt_rand(0, count($legal) - 1)];
+                }
+                if (!self::stepSelf($e['body'], $pick, $width, $height, $combined)) {
+                    $kills++; // illegal move means they died on the way
+                    continue;
+                }
+                $newEnemies[] = $e;
+            }
+            $enemies = $newEnemies;
+
+            // 2. I pick my move from legal options against the *updated*
+            //    enemy occupancy. Head-on with a longer enemy looks like a
+            //    blocked cell here (enemy head is in occupancy + longer);
+            //    head-on with a shorter enemy is allowed and resolved below.
+            [$myLegal, $headOnTargets] = self::legalSelfMovesWithHeadOnTargets(
+                $myBody,
+                count($myBody),
+                $enemies,
+                $width,
+                $height,
+            );
+            if ($myLegal === []) {
                 break;
             }
-            $pick = $legal[random_int(0, count($legal) - 1)];
-            if (!self::stepSelf($myBody, $pick, $width, $height, $enemyOcc)) {
+            $pick = $myLegal[mt_rand(0, count($myLegal) - 1)];
+
+            // 3. Step me. The destination might be an enemy head we can
+            //    legally take — in that case we kill them and proceed.
+            [$dx, $dy] = self::DIRECTIONS[$pick];
+            $nx = $myBody[0][0] + $dx;
+            $ny = $myBody[0][1] + $dy;
+            $tail = array_pop($myBody);
+            array_unshift($myBody, [$nx, $ny]);
+
+            $targetKey = self::key($nx, $ny);
+            if (isset($headOnTargets[$targetKey])) {
+                // We body-checked a strictly-shorter enemy head.
+                $kills++;
+                $enemies = array_values(array_filter(
+                    $enemies,
+                    static fn(array $e): bool => !($e['body'][0][0] === $nx && $e['body'][0][1] === $ny),
+                ));
+            }
+
+            // 4. Any enemy whose head now equals mine post-move triggers a
+            //    head-on. Resolution: longer wins; equal length kills both.
+            //    (Enemy heads moved in step 1, mine in step 3 — same turn.)
+            $iDied = false;
+            $newEnemies = [];
+            foreach ($enemies as $e) {
+                if ($e['body'][0][0] === $myBody[0][0] && $e['body'][0][1] === $myBody[0][1]) {
+                    if ($e['length'] >= count($myBody)) {
+                        $iDied = true;
+                    }
+                    if ($e['length'] <= count($myBody)) {
+                        $kills++;
+                        continue; // they die
+                    }
+                }
+                $newEnemies[] = $e;
+            }
+            $enemies = $newEnemies;
+            if ($iDied) {
                 break;
             }
             $survived++;
         }
 
-        return (float) $survived;
+        return (float) $survived + $kills * $killBonus;
     }
 
     /**
      * Mutates $body in place: prepend the new head, drop the tail.
-     * Returns false if the move is illegal (hit wall / body / enemy).
+     * Returns false if the move is illegal (hit wall / body / blocked cell).
+     *
+     * @param array<string,bool> $blocked Cells that count as obstacles (enemy
+     *                                    bodies in the static case, or all-snakes
+     *                                    bodies in the enemy-aware rollout case).
      */
-    private static function stepSelf(array &$body, string $move, int $width, int $height, array $enemyOcc): bool
+    private static function stepSelf(array &$body, string $move, int $width, int $height, array $blocked): bool
     {
         [$dx, $dy] = self::DIRECTIONS[$move];
         [$hx, $hy] = $body[0];
@@ -499,7 +621,7 @@ final class Safety
         if ($nx < 0 || $nx >= $width || $ny < 0 || $ny >= $height) {
             return false;
         }
-        if (isset($enemyOcc[self::key($nx, $ny)])) {
+        if (isset($blocked[self::key($nx, $ny)])) {
             return false;
         }
         // Tail vacates this same turn (we're not tracking food in the rollout),
@@ -516,9 +638,12 @@ final class Safety
     }
 
     /**
+     * Legal moves for a snake whose body is $body. "Legal" means walls and
+     * blocked cells; head-on logic is the caller's responsibility.
+     *
      * @return list<string>
      */
-    private static function legalSelfMoves(array $body, int $width, int $height, array $enemyOcc): array
+    private static function legalSelfMoves(array $body, int $width, int $height, array $blocked): array
     {
         [$hx, $hy] = $body[0];
         $bodyKeys = [];
@@ -535,12 +660,140 @@ final class Safety
                 continue;
             }
             $k = self::key($nx, $ny);
-            if (isset($bodyKeys[$k]) || isset($enemyOcc[$k])) {
+            if (isset($bodyKeys[$k]) || isset($blocked[$k])) {
                 continue;
             }
             $out[] = $dir;
         }
         return $out;
+    }
+
+    /**
+     * Variant of legalSelfMoves used by the enemy-aware rollout for *my* turn.
+     * Returns the legal direction list AND a map of "destination key →
+     * shorter-enemy-head-we'd-kill-by-going-there", so the caller can
+     * credit a kill when it chooses one of those moves.
+     *
+     * Head-on logic mirrors the production legalMoves filter
+     * (Safety::headToHeadLoss): a cell is excluded if any enemy of equal-or-
+     * greater length *could* move into it next turn (not just if it equals
+     * their current head). Without this predictive check, the rollout sees
+     * a snake walking adjacent to a longer enemy as "safe", then dies one
+     * turn later when the enemy boxes us in — exactly the game-86b92eaf
+     * pattern we're trying to detect.
+     *
+     * @return array{0:list<string>,1:array<string,bool>}
+     */
+    private static function legalSelfMovesWithHeadOnTargets(
+        array $myBody,
+        int $myLength,
+        array $enemies,
+        int $width,
+        int $height
+    ): array {
+        $bodyKeys = [];
+        $stopAt   = count($myBody) - 1;
+        for ($i = 0; $i < $stopAt; $i++) {
+            $bodyKeys[self::key($myBody[$i][0], $myBody[$i][1])] = true;
+        }
+
+        // Enemy non-head occupancy (head handled via the predictive check).
+        $enemyNonHeads = [];
+        foreach ($enemies as $e) {
+            $segs = count($e['body']);
+            if ($segs === 0) {
+                continue;
+            }
+            $tailStop = $segs - 1;
+            for ($i = 1; $i < $tailStop; $i++) {
+                $enemyNonHeads[self::key($e['body'][$i][0], $e['body'][$i][1])] = true;
+            }
+        }
+
+        [$hx, $hy] = $myBody[0];
+        $legal = [];
+        $killTargets = [];
+        foreach (self::DIRECTIONS as $dir => [$dx, $dy]) {
+            $nx = $hx + $dx;
+            $ny = $hy + $dy;
+            if ($nx < 0 || $nx >= $width || $ny < 0 || $ny >= $height) {
+                continue;
+            }
+            $k = self::key($nx, $ny);
+            if (isset($bodyKeys[$k]) || isset($enemyNonHeads[$k])) {
+                continue;
+            }
+
+            // Predictive head-on: for each enemy, check whether any cell
+            // adjacent to their current head equals our candidate. Equal-or-
+            // longer enemies block; strictly shorter become kill targets.
+            $blockedByHeadOn = false;
+            $kill = false;
+            foreach ($enemies as $e) {
+                $eHx = $e['body'][0][0];
+                $eHy = $e['body'][0][1];
+                foreach (self::DIRECTIONS as [$edx, $edy]) {
+                    if ($eHx + $edx !== $nx || $eHy + $edy !== $ny) {
+                        continue;
+                    }
+                    if ($e['length'] >= $myLength) {
+                        $blockedByHeadOn = true;
+                        break 2;
+                    }
+                    $kill = true;
+                }
+            }
+            if ($blockedByHeadOn) {
+                continue;
+            }
+            if ($kill) {
+                $killTargets[$k] = true;
+            }
+            $legal[] = $dir;
+        }
+        return [$legal, $killTargets];
+    }
+
+    /**
+     * Occupancy of "all enemies" body cells. Optionally exclude one enemy
+     * (used when computing the obstacle set for that enemy's own legal-move
+     * check) and optionally include tails (which normally vacate).
+     *
+     * @param list<array{body:list<array{0:int,1:int}>,length:int,id:string}> $enemies
+     * @return array<string,bool>
+     */
+    private static function occupancyOfAll(array $enemies, bool $includeTails, ?int $except = null): array
+    {
+        $occ = [];
+        foreach ($enemies as $i => $e) {
+            if ($except !== null && $i === $except) {
+                continue;
+            }
+            $segs = count($e['body']);
+            $stopAt = $includeTails ? $segs : $segs - 1;
+            for ($j = 0; $j < $stopAt; $j++) {
+                $occ[self::key($e['body'][$j][0], $e['body'][$j][1])] = true;
+            }
+        }
+        return $occ;
+    }
+
+    /**
+     * Occupancy of my own body — same shape as occupancyOfAll, used to
+     * build the "everything that's currently a snake" obstacle set for an
+     * enemy's legal-move computation.
+     *
+     * @return array<string,bool>
+     */
+    private static function occupancyOfSelf(array $myBody, bool $includeTail): array
+    {
+        $occ = [];
+        $segs = count($myBody);
+        $stopAt = $includeTail ? $segs : $segs - 1;
+        for ($i = 0; $i < $stopAt; $i++) {
+            $occ[self::key($myBody[$i][0], $myBody[$i][1])] = true;
+        }
+        return $occ;
     }
 
     private static function key(int $x, int $y): string

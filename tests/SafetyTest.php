@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BattlesnakeAI\Tests;
 
+use BattlesnakeAI\IncrementalMcts;
 use BattlesnakeAI\Safety;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\Test;
@@ -456,12 +457,56 @@ final class SafetyTest extends TestCase
         if ($scored['down'] <= $scored['right']) {
             $this->markTestIncomplete(
                 'pure Voronoi rewards advancing toward longer enemies; ' .
-                'fix lives in item #2 (enemy-aware MCTS). ' .
+                'the MCTS lookahead test below is the real guard for this state. ' .
                 "down={$scored['down']} right={$scored['right']}"
             );
         }
         $this->assertGreaterThan($scored['right'], $scored['down'],
             'down (retreat into open bottom-left) must outrank right (advance toward a longer enemy on the top edge)');
+    }
+
+    #[Test]
+    public function regression_game_86b92eaf_turn_52_mcts_picks_down_over_right(): void
+    {
+        // Same state as the ranker test above, but evaluated through MCTS.
+        // The enemy-aware rollouts simulate the length-8 enemy occasionally
+        // closing in on us; over many rollouts 'right' (advance toward them
+        // along the top edge) averages a lower survival score than 'down'
+        // (retreat into uncontested bottom-left), so MCTS should pick 'down'.
+        $me = $this->snake('me', [
+            ['x' => 2, 'y' => 10],
+            ['x' => 1, 'y' => 10],
+            ['x' => 1, 'y' => 9],
+            ['x' => 0, 'y' => 9],
+        ], health: 71);
+        $enemy = $this->snake('foe', [
+            ['x' => 5, 'y' => 9], ['x' => 6, 'y' => 9], ['x' => 6, 'y' => 8],
+            ['x' => 7, 'y' => 8], ['x' => 8, 'y' => 8], ['x' => 8, 'y' => 7],
+            ['x' => 8, 'y' => 6], ['x' => 8, 'y' => 5],
+        ], health: 96);
+        $state = [
+            'turn'  => 52,
+            'board' => $this->board([$me, $enemy]),
+            'you'   => $me,
+        ];
+
+        // Use both legal moves at this state. The ranker happens to order
+        // them right-then-down (Voronoi rewards the advance), so we pass an
+        // explicit order to MCTS rather than relying on it.
+        $safeMoves = ['down', 'right'];
+
+        // Seed deterministically so the test isn't flaky. mt_srand controls
+        // the random_int-free path the rollout now uses.
+        mt_srand(42);
+
+        $mcts = new IncrementalMcts($state, $safeMoves, depth: 25);
+        for ($i = 0; $i < 300; $i++) {
+            $mcts->runOne();
+        }
+
+        $pick = $mcts->best();
+        $this->assertSame('down', $pick,
+            'MCTS rollouts that model the longer enemy advancing must prefer down over the top-edge advance');
     }
 
     // ---- mctsMove ---------------------------------------------------------
