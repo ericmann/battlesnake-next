@@ -164,31 +164,66 @@ final class Safety
             return [($fallback ?? 'up') => 0];
         }
 
-        // Compute the food-seeking weight. Zero out the bonus entirely if
-        // both conditions are healthy.
-        $hungerWeight = max(0.0, (60.0 - $myHealth) / 60.0);
-        $lengthDeficitWeight = max(0.0, ($maxEnemyLen + 2 - $myLen) / 5.0);
-        $foodWeight = max($hungerWeight, $lengthDeficitWeight);
-        $foodWeight = min(1.0, $foodWeight);
+        // Detect "loiter mode": every legal move leads to a region too
+        // tight to outrun. When this fires, food becomes dangerous (eating
+        // grows us further into the trap) and the right play is to follow
+        // our own tail — it vacates every turn, keeping a cyclic loop of
+        // breathable space open. Threshold of 1.5× length is the soft point
+        // where the body barely fits, with enough room to maneuver.
+        $maxArea = max($candidates);
+        $loiterThreshold = (int) ceil($myLen * 1.5);
+        $loiterMode = $maxArea < $loiterThreshold;
 
-        $foodCells = $board['food'] ?? [];
-        $combined = $candidates; // start from raw area, optionally add food bonus
-        if ($foodWeight > 0.0 && $foodCells !== []) {
-            $foodDistance = self::multiSourceBfsDistances($foodCells, $blocked, $width, $height);
+        $combined = $candidates; // default: combined = raw area
+
+        if ($loiterMode) {
+            // Loiter: rank by tail proximity (closer to tail = higher), with
+            // raw area dominating so we never pick a 1-cell pocket just
+            // because it sits next to the tail.
+            $body = $me['body'];
+            $tail = $body[count($body) - 1];
+            $tailDist = self::multiSourceBfsDistances(
+                [['x' => (int) $tail['x'], 'y' => (int) $tail['y']]],
+                $blocked,
+                $width,
+                $height,
+            );
+            $maxFallbackDist = $width + $height;
             foreach ($candidates as $dir => $area) {
                 [$dx, $dy] = self::DIRECTIONS[$dir];
                 $nx = (int) $head['x'] + $dx;
                 $ny = (int) $head['y'] + $dy;
-                $dist = $foodDistance[self::key($nx, $ny)] ?? null;
-                if ($dist === null) {
-                    continue; // food unreachable from this direction
+                $d = $tailDist[self::key($nx, $ny)] ?? $maxFallbackDist;
+                // 0.5 per distance unit keeps area as the primary signal
+                // (so a 1-cell pocket beside the tail still loses to a
+                // wide path two cells from the tail) while still breaking
+                // ties on tail proximity.
+                $combined[$dir] = $area - $d * 0.5;
+            }
+        } else {
+            // Normal mode: optional food bonus, weighted by hunger and
+            // length deficit (the two conditions where eating is worth
+            // the body growth).
+            $hungerWeight = max(0.0, (60.0 - $myHealth) / 60.0);
+            $lengthDeficitWeight = max(0.0, ($maxEnemyLen + 2 - $myLen) / 5.0);
+            $foodWeight = min(1.0, max($hungerWeight, $lengthDeficitWeight));
+
+            $foodCells = $board['food'] ?? [];
+            if ($foodWeight > 0.0 && $foodCells !== []) {
+                $foodDistance = self::multiSourceBfsDistances($foodCells, $blocked, $width, $height);
+                foreach ($candidates as $dir => $area) {
+                    [$dx, $dy] = self::DIRECTIONS[$dir];
+                    $nx = (int) $head['x'] + $dx;
+                    $ny = (int) $head['y'] + $dy;
+                    $dist = $foodDistance[self::key($nx, $ny)] ?? null;
+                    if ($dist === null) {
+                        continue; // food unreachable from this direction
+                    }
+                    // Bonus shrinks fast with distance — a food at the next
+                    // cell matters far more than one 10 cells away.
+                    $bonus = $foodWeight * (self::FOOD_BONUS / ($dist + 1.0));
+                    $combined[$dir] = $area + $bonus;
                 }
-                // Bonus shrinks fast with distance — a food at the next cell
-                // matters far more than one 10 cells away. FOOD_BONUS sets
-                // the maximum contribution when both weight and proximity
-                // are maxed out.
-                $bonus = $foodWeight * (self::FOOD_BONUS / ($dist + 1.0));
-                $combined[$dir] = $area + $bonus;
             }
         }
 
