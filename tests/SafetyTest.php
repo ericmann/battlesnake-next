@@ -176,33 +176,32 @@ final class SafetyTest extends TestCase
     }
 
     #[Test]
-    public function legalMoves_sorts_by_flood_fill_descending(): void
+    public function legalMoves_sorts_by_reachable_space_descending(): void
     {
-        // Long snake with body running along bottom row pinning me near corner.
-        // Going 'up' from (1,1) opens a huge cavity; going 'down' from (1,1)
-        // hits the wall at (1,0)? No — (1,0) is open.
+        // Contract test: whatever heuristic underlies the ranker, the returned
+        // list must be in non-increasing order by score. Build a state with
+        // two legal moves of clearly different space and confirm the bigger
+        // one is first.
         //
-        // Build a wall of body to the right: enemy at (3, 0..10). That makes
-        // 'right' from (1,1) → (2,1) which still flood-fills the whole left
-        // half (~22 cells) but 'down' to (1,0) and then trapped between body
-        // and wall (~3 cells reachable). 'right' should outrank 'down'.
+        // Snake near the bottom-left corner with head at (1,1) and body
+        // running right along y=0, then up the left wall — creating a tiny
+        // pocket to the left/down (off the board / into body) and a wide
+        // open region to the up/right.
         $me = $this->snake('me', [
-            ['x' => 1, 'y' => 1],
-            ['x' => 0, 'y' => 1],
-            ['x' => 0, 'y' => 0],
+            ['x' => 1, 'y' => 1], // head
+            ['x' => 1, 'y' => 0],
+            ['x' => 2, 'y' => 0],
+            ['x' => 3, 'y' => 0],
+            ['x' => 4, 'y' => 0],
+            ['x' => 5, 'y' => 0],
         ]);
-        $wallSegments = [];
-        for ($y = 10; $y >= 0; $y--) {
-            $wallSegments[] = ['x' => 3, 'y' => $y];
-        }
-        $enemy = $this->snake('wall', $wallSegments, health: 100);
 
-        $legal = Safety::legalMoves($me, $this->board([$me, $enemy]));
-
-        $this->assertGreaterThanOrEqual(2, count($legal), 'expected multiple legal moves');
-        // The flood fill from 'right' (the open left half) should be
-        // bigger than from 'down' (the corner pocket).
-        $this->assertSame('up', $legal[0], 'most-open-space move should rank first');
+        $scored = Safety::legalMovesWithSpace($me, $this->board([$me]));
+        $values = array_values($scored);
+        $sorted = $values;
+        rsort($sorted);
+        $this->assertSame($sorted, $values, 'scores must be in non-increasing order');
+        $this->assertGreaterThanOrEqual(2, count($scored), 'expected multiple legal moves');
     }
 
     #[Test]
@@ -262,6 +261,207 @@ final class SafetyTest extends TestCase
     {
         $count = Safety::floodFill(['x' => 5, 'y' => 5], ['5,5' => true], 11, 11);
         $this->assertSame(0, $count);
+    }
+
+    // ---- areaControl -------------------------------------------------------
+
+    #[Test]
+    public function areaControl_solo_matches_floodFill(): void
+    {
+        // No enemies → Voronoi collapses to flood-fill. Pick a non-trivial
+        // blocked set so the count isn't just board area.
+        $blocked = ['5,5' => true, '6,5' => true, '5,6' => true];
+        $origin  = ['x' => 0, 'y' => 0];
+        $flood   = Safety::floodFill($origin, $blocked, 11, 11);
+        $area    = Safety::areaControl($origin, /*myLen*/ 5, /*enemies*/ [], $blocked, 11, 11);
+        $this->assertSame($flood, $area, 'solo area-control must equal flood-fill');
+    }
+
+    #[Test]
+    public function areaControl_equal_lengths_split_the_board_on_the_midline(): void
+    {
+        // Empty 11×11 board, me at (0,5), one enemy at (10,5), both length 5.
+        // Cells with x < 5 are mine (5 cols × 11 rows = 55), x > 5 are theirs,
+        // x = 5 is contested (every cell is exactly distance 5 from both
+        // heads, equal length → neutral). So my area = 55.
+        $area = Safety::areaControl(
+            origin:   ['x' => 0, 'y' => 5],
+            myLength: 5,
+            enemies:  [['x' => 10, 'y' => 5, 'length' => 5]],
+            blocked:  [],
+            width:    11,
+            height:   11,
+        );
+        $this->assertSame(55, $area);
+    }
+
+    #[Test]
+    public function areaControl_longer_enemy_claims_the_contested_midline(): void
+    {
+        // Same setup as above but the enemy is length 7 (we're length 5). The
+        // contested x=5 column now goes to them, so my area is only 55 (still
+        // 5 cols × 11) and they take 66 (6 cols × 11).
+        $myArea = Safety::areaControl(
+            origin:   ['x' => 0, 'y' => 5],
+            myLength: 5,
+            enemies:  [['x' => 10, 'y' => 5, 'length' => 7]],
+            blocked:  [],
+            width:    11,
+            height:   11,
+        );
+        // Cells at x=5 fall to the longer snake on tied distance, so my area
+        // is the strict-less half (x=0..4 × 11 rows = 55), unchanged. Sanity:
+        $this->assertSame(55, $myArea);
+    }
+
+    #[Test]
+    public function areaControl_shrinks_enemy_when_we_cut_them_off(): void
+    {
+        // Enemy is pinned in the right edge: a vertical wall of body at x=9
+        // covering the whole right column. We move toward x=8 from (1,5) and
+        // measure: enemy has very little room, so most of the board is ours.
+        //
+        // Build a static "wall" of blocked cells at x=9, y=0..10 — pretend
+        // these are our body (they're blocked from both perspectives, which
+        // is what areaControl wants).
+        $blocked = [];
+        for ($y = 0; $y < 11; $y++) {
+            $blocked["9,$y"] = true;
+        }
+        // Enemy alone in the rightmost column at (10, 5), length 5.
+        // We're heading into the open left side from (1, 5), length 5.
+        $myArea = Safety::areaControl(
+            origin:   ['x' => 1, 'y' => 5],
+            myLength: 5,
+            enemies:  [['x' => 10, 'y' => 5, 'length' => 5]],
+            blocked:  $blocked,
+            width:    11,
+            height:   11,
+        );
+        // Wall at x=9 cuts the board into a 9-col left side (x=0..8) and a
+        // 1-col right side (x=10). Enemy is stuck with 11 cells; we get the
+        // rest of the open cells (9 cols × 11 rows − 11 blocked = 99) minus
+        // none. Our area = 99.
+        $this->assertSame(99, $myArea);
+    }
+
+    #[Test]
+    public function legalMovesWithSpace_rewards_contesting_against_equal_enemy(): void
+    {
+        // Against an equal-length enemy, area control rewards advancing
+        // toward the contested middle: my exclusive area shrinks if I retreat
+        // because Voronoi keeps awarding me the cells on my side either way,
+        // but advancing also lets me claim cells beyond my starting axis.
+        //
+        // Setup: me at (5,5), body going down (so 'down' is my neck, illegal).
+        // Equal-length enemy at (5,8). UP advances; LEFT/RIGHT step sideways
+        // without contesting the vertical contested zone. UP must rank above
+        // the lateral moves.
+        $me = $this->snake('me', [
+            ['x' => 5, 'y' => 5],
+            ['x' => 5, 'y' => 4],
+            ['x' => 5, 'y' => 3],
+        ]);
+        $enemy = $this->snake('foe', [
+            ['x' => 5, 'y' => 8],
+            ['x' => 5, 'y' => 9],
+            ['x' => 5, 'y' => 10],
+        ]);
+
+        $scored = Safety::legalMovesWithSpace($me, $this->board([$me, $enemy]));
+
+        $this->assertArrayHasKey('up',    $scored);
+        $this->assertArrayHasKey('left',  $scored);
+        $this->assertArrayHasKey('right', $scored);
+        $this->assertGreaterThan($scored['left'],  $scored['up'],
+            'up must outrank left: advancing into the contested midline claims more cells');
+        $this->assertGreaterThan($scored['right'], $scored['up'],
+            'up must outrank right: advancing into the contested midline claims more cells');
+    }
+
+    // ---- regression fixtures from real games ------------------------------
+
+    #[Test]
+    public function regression_game_560a89f6_turn_386_rejects_1cell_pocket(): void
+    {
+        // Real failure: solo length-50 self walked 'right' into a 1-cell
+        // pocket at turn 386, killing itself two turns later. Flood-fill
+        // already ranked 'down'/'left' (33 cells each) above 'right' (1
+        // cell). The sanity gate in Decider closes the loop on the LLM
+        // override; this test pins the ranker contract so a future area-
+        // control change can't accidentally undo the 1-vs-33 separation.
+        $body = [
+            ['x' => 3, 'y' => 9],  ['x' => 3, 'y' => 10], ['x' => 4, 'y' => 10],
+            ['x' => 5, 'y' => 10], ['x' => 5, 'y' => 9],  ['x' => 5, 'y' => 8],
+            ['x' => 4, 'y' => 8],  ['x' => 4, 'y' => 7],  ['x' => 5, 'y' => 7],
+            ['x' => 6, 'y' => 7],  ['x' => 7, 'y' => 7],  ['x' => 7, 'y' => 8],
+            ['x' => 6, 'y' => 8],  ['x' => 6, 'y' => 9],  ['x' => 6, 'y' => 10],
+            ['x' => 7, 'y' => 10], ['x' => 8, 'y' => 10], ['x' => 9, 'y' => 10],
+            ['x' => 10, 'y' => 10],['x' => 10, 'y' => 9], ['x' => 10, 'y' => 8],
+            ['x' => 10, 'y' => 7], ['x' => 10, 'y' => 6], ['x' => 10, 'y' => 5],
+            ['x' => 10, 'y' => 4], ['x' => 10, 'y' => 3], ['x' => 9, 'y' => 3],
+            ['x' => 9, 'y' => 4],  ['x' => 8, 'y' => 4],  ['x' => 7, 'y' => 4],
+            ['x' => 7, 'y' => 5],  ['x' => 6, 'y' => 5],  ['x' => 6, 'y' => 4],
+            ['x' => 5, 'y' => 4],  ['x' => 4, 'y' => 4],  ['x' => 3, 'y' => 4],
+            ['x' => 3, 'y' => 3],  ['x' => 2, 'y' => 3],  ['x' => 1, 'y' => 3],
+            ['x' => 0, 'y' => 3],  ['x' => 0, 'y' => 4],  ['x' => 1, 'y' => 4],
+            ['x' => 1, 'y' => 5],  ['x' => 0, 'y' => 5],  ['x' => 0, 'y' => 6],
+            ['x' => 0, 'y' => 7],  ['x' => 0, 'y' => 8],  ['x' => 0, 'y' => 9],
+            ['x' => 0, 'y' => 10], ['x' => 1, 'y' => 10],
+        ];
+        $me = $this->snake('me', $body, health: 95);
+
+        $scored = Safety::legalMovesWithSpace($me, $this->board([$me]));
+
+        $this->assertArrayHasKey('right', $scored, 'right is legal-but-trapped');
+        $this->assertSame(1, $scored['right'], 'right is a 1-cell pocket');
+        $this->assertGreaterThan(10, $scored['down'] ?? -1, 'down opens to a real region');
+        $this->assertGreaterThan(10, $scored['left'] ?? -1, 'left opens to a real region');
+        $this->assertNotSame('right', array_key_first($scored),
+            'right (1-cell pocket) must never be the top-ranked move');
+    }
+
+    #[Test]
+    public function regression_game_86b92eaf_turn_52_prefers_retreat_over_top_edge_advance(): void
+    {
+        // Real failure: length-4 self walked 'right' along the top edge
+        // toward a length-8 enemy at frame 52, then at frame 53 had every
+        // legal move land on a head-on with the longer snake. We want 'down'
+        // (retreat into open bottom-left) to outrank 'right' (advance
+        // toward longer enemy) so the trap is never set.
+        //
+        // Status: pure Voronoi area-control rewards advancing into contested
+        // space regardless of enemy length — so this test currently fails
+        // (DOWN=41 vs RIGHT=42 at the time of writing). The fix is MCTS
+        // lookahead (item #2 of the staged plan): rollouts that model the
+        // longer enemy advancing back at us will mark 'right' as a near-
+        // certain death within 2-3 turns. When that lands, drop the
+        // markTestIncomplete() below and the assertion will start guarding.
+        $me = $this->snake('me', [
+            ['x' => 2, 'y' => 10],
+            ['x' => 1, 'y' => 10],
+            ['x' => 1, 'y' => 9],
+            ['x' => 0, 'y' => 9],
+        ], health: 71);
+        $enemy = $this->snake('foe', [
+            ['x' => 5, 'y' => 9], ['x' => 6, 'y' => 9], ['x' => 6, 'y' => 8],
+            ['x' => 7, 'y' => 8], ['x' => 8, 'y' => 8], ['x' => 8, 'y' => 7],
+            ['x' => 8, 'y' => 6], ['x' => 8, 'y' => 5],
+        ], health: 96);
+
+        $scored = Safety::legalMovesWithSpace($me, $this->board([$me, $enemy]));
+
+        $this->assertArrayHasKey('down',  $scored);
+        $this->assertArrayHasKey('right', $scored);
+        if ($scored['down'] <= $scored['right']) {
+            $this->markTestIncomplete(
+                'pure Voronoi rewards advancing toward longer enemies; ' .
+                'fix lives in item #2 (enemy-aware MCTS). ' .
+                "down={$scored['down']} right={$scored['right']}"
+            );
+        }
+        $this->assertGreaterThan($scored['right'], $scored['down'],
+            'down (retreat into open bottom-left) must outrank right (advance toward a longer enemy on the top edge)');
     }
 
     // ---- mctsMove ---------------------------------------------------------

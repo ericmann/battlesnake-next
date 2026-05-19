@@ -55,25 +55,34 @@ final class Safety
 
     /**
      * Same legal-move computation as legalMoves() but returns the per-move
-     * flood-fill space score alongside the direction name.
+     * area-control score alongside the direction name.
      *
-     * @return array<string,int> Map of direction → reachable-cell count, sorted
-     *                           descending by space. Guaranteed non-empty. When
-     *                           every move is fatal, the single entry has a
-     *                           score of 0 — caller can detect "everything is
-     *                           dead" without a separate flag.
+     * Score is the number of cells my head reaches strictly before any enemy
+     * head in a multi-source BFS (see areaControl). In a solo game this is
+     * identical to the older floodFill-based score — only when enemies exist
+     * does the score differ, by attributing contested cells to whoever wins
+     * the race.
+     *
+     * @return array<string,int> Map of direction → area-control score, sorted
+     *                           descending. Guaranteed non-empty. When every
+     *                           move is fatal, the single entry has score 0 —
+     *                           caller can detect "everything is dead" without
+     *                           a separate flag.
      */
     public static function legalMovesWithSpace(array $me, array $board): array
     {
         $width  = (int) $board['width'];
         $height = (int) $board['height'];
         $head   = $me['head'];
+        $myLen  = (int) $me['length'];
+        $myId   = $me['id'] ?? null;
 
         // Build the occupancy map for "next turn": a set of cells we cannot
         // safely enter. Every snake's body except the tail is blocked. The
         // tail vacates next turn unless that snake just ate this turn (length
         // != tail-segment-count means the tail just grew — careful).
         $blocked = [];
+        $enemies = [];
         foreach ($board['snakes'] as $snake) {
             $body = $snake['body'];
             $segCount = count($body);
@@ -87,6 +96,13 @@ final class Safety
             $stopAt  = $justAte ? $segCount : $segCount - 1; // exclude tail when it will vacate
             for ($i = 0; $i < $stopAt; $i++) {
                 $blocked[self::key($body[$i]['x'], $body[$i]['y'])] = true;
+            }
+            if (($snake['id'] ?? null) !== $myId) {
+                $enemies[] = [
+                    'x'      => (int) $snake['head']['x'],
+                    'y'      => (int) $snake['head']['y'],
+                    'length' => (int) $snake['length'],
+                ];
             }
         }
 
@@ -115,7 +131,14 @@ final class Safety
                 continue;
             }
 
-            $candidates[$dir] = self::floodFill(['x' => $nx, 'y' => $ny], $blocked, $width, $height);
+            $candidates[$dir] = self::areaControl(
+                ['x' => $nx, 'y' => $ny],
+                $myLen,
+                $enemies,
+                $blocked,
+                $width,
+                $height
+            );
         }
 
         if ($candidates === []) {
@@ -125,9 +148,145 @@ final class Safety
             return [($fallback ?? 'up') => 0];
         }
 
-        // Sort descending by reachable cells. Stable order on ties is fine.
+        // Sort descending by area-control score. Stable order on ties is fine.
         arsort($candidates);
         return $candidates;
+    }
+
+    /**
+     * Voronoi area control from a hypothetical landing cell.
+     *
+     * Multi-source BFS: start from $origin (my head's next position) and
+     * every enemy head simultaneously, advance one step at a time. A cell
+     * is claimed by whoever reaches it first; on simultaneous arrival,
+     * the longer snake wins and equal-length ties go to no one. Returns
+     * the count of cells claimed by me (including the origin itself).
+     *
+     * In a solo game (no enemies), this collapses to floodFill(): only one
+     * frontier exists, so every reachable cell is mine.
+     *
+     * The score generalises both halves of "smarter snake":
+     *   - Self-preservation: my area shrinks if I'm walking into a region
+     *     an enemy can reach first, even if it's still a large region by
+     *     raw cell count.
+     *   - Aggression: a move that cuts an enemy off from open space shows
+     *     up as a jump in my area / drop in theirs — same operation from
+     *     opposite ends.
+     *
+     * @param array{x:int,y:int}                                       $origin   My hypothetical next head cell.
+     * @param int                                                      $myLength My current length.
+     * @param list<array{x:int,y:int,length:int}>                      $enemies  Enemy heads + lengths.
+     * @param array<string,bool>                                       $blocked  Body-occupancy map (tails already
+     *                                                                            vacated by the caller — same map
+     *                                                                            shape floodFill consumes).
+     */
+    public static function areaControl(
+        array $origin,
+        int $myLength,
+        array $enemies,
+        array $blocked,
+        int $width,
+        int $height
+    ): int {
+        $ox = (int) $origin['x'];
+        $oy = (int) $origin['y'];
+        if ($ox < 0 || $ox >= $width || $oy < 0 || $oy >= $height) {
+            return 0;
+        }
+        $originKey = self::key($ox, $oy);
+        if (isset($blocked[$originKey])) {
+            return 0;
+        }
+
+        // Owner indices: 0 = me, 1..n = enemies (in input order). Lengths
+        // are looked up by the same index.
+        $lengths = [$myLength];
+        $claimed = [$originKey => 0];
+        $frontiers = [0 => [[$ox, $oy]]];
+
+        foreach ($enemies as $i => $e) {
+            $idx = $i + 1;
+            $lengths[] = (int) $e['length'];
+            $ex = (int) $e['x'];
+            $ey = (int) $e['y'];
+            $eKey = self::key($ex, $ey);
+            // Always seed enemy heads, even when they're in $blocked — the
+            // caller's blocked map includes head cells as body segments, but
+            // for area-control purposes a head IS the BFS source. Marking the
+            // cell as claimed prevents anyone else from racing into it.
+            $claimed[$eKey] = $idx;
+            $frontiers[$idx] = [[$ex, $ey]];
+        }
+
+        $myCount = 1; // origin counts toward my area
+
+        // Level-synchronous BFS: at each step, all owners expand their
+        // frontiers in parallel, then we resolve any cell that multiple
+        // owners reached at the same distance.
+        while (true) {
+            $proposed = []; // cellKey => list<ownerIdx> trying to claim this level
+            $any = false;
+            foreach ($frontiers as $owner => $cells) {
+                if ($cells === []) {
+                    continue;
+                }
+                $any = true;
+                foreach ($cells as [$x, $y]) {
+                    foreach (self::DIRECTIONS as [$dx, $dy]) {
+                        $nx = $x + $dx;
+                        $ny = $y + $dy;
+                        if ($nx < 0 || $nx >= $width || $ny < 0 || $ny >= $height) {
+                            continue;
+                        }
+                        $k = self::key($nx, $ny);
+                        if (isset($blocked[$k]) || isset($claimed[$k])) {
+                            continue;
+                        }
+                        $proposed[$k][$owner] = [$nx, $ny];
+                    }
+                }
+                $frontiers[$owner] = []; // emptied; refilled below
+            }
+            if (!$any) {
+                break;
+            }
+
+            foreach ($proposed as $k => $bidders) {
+                if (count($bidders) === 1) {
+                    $owner = array_key_first($bidders);
+                    $claimed[$k] = $owner;
+                    $frontiers[$owner][] = $bidders[$owner];
+                    if ($owner === 0) {
+                        $myCount++;
+                    }
+                    continue;
+                }
+                // Multi-owner contention: longest wins; tie → neutral.
+                $maxLen = -1;
+                $winner = null;
+                foreach ($bidders as $owner => $_) {
+                    $len = $lengths[$owner];
+                    if ($len > $maxLen) {
+                        $maxLen = $len;
+                        $winner = $owner;
+                    } elseif ($len === $maxLen) {
+                        $winner = null;
+                    }
+                }
+                if ($winner === null) {
+                    // Neutral cell — block it so no one expands through it.
+                    $claimed[$k] = -1;
+                    continue;
+                }
+                $claimed[$k] = $winner;
+                $frontiers[$winner][] = $bidders[$winner];
+                if ($winner === 0) {
+                    $myCount++;
+                }
+            }
+        }
+
+        return $myCount;
     }
 
     /**
