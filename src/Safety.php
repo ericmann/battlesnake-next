@@ -538,6 +538,30 @@ final class Safety
                     $kills++; // illegal move means they died on the way
                     continue;
                 }
+
+                // Killshot detection: after the enemy moves, flood-fill from
+                // their new head. If their reachable area is smaller than
+                // their length, they can't fit their own body and are
+                // imminently dead — credit the kill now and drop them from
+                // the rollout. This is the aggression signal: setup moves
+                // that pinch an enemy's reachable space below their length
+                // will accumulate kill credit in rollouts, so MCTS prefers
+                // them over equally-safe non-setup moves.
+                $eHead = ['x' => $e['body'][0][0], 'y' => $e['body'][0][1]];
+                $blockedForE = $combined;
+                // Add the enemy's *own* body (minus head and minus tail) as
+                // obstacles. $combined excludes this enemy (because we used
+                // except:$i above), so we need to add their newly-stepped
+                // body for the area calc.
+                $eSegs = count($e['body']);
+                for ($j = 1; $j < $eSegs - 1; $j++) {
+                    $blockedForE[self::key($e['body'][$j][0], $e['body'][$j][1])] = true;
+                }
+                $area = self::floodFill($eHead, $blockedForE, $width, $height);
+                if ($area < $e['length']) {
+                    $kills++;
+                    continue;
+                }
                 $newEnemies[] = $e;
             }
             $enemies = $newEnemies;

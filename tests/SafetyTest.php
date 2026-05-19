@@ -466,6 +466,44 @@ final class SafetyTest extends TestCase
     }
 
     #[Test]
+    public function rollout_credits_kill_when_enemy_area_drops_below_length(): void
+    {
+        // A length-6 enemy is curled into the bottom-left such that they
+        // have exactly one legal move ((0,1) → (0,0)). My body forms a
+        // wall at x=3 cutting off the right-ward escape. After they step
+        // down, the enemy's reachable area is 2 cells (their own length 6)
+        // → killshot detection triggers and credits a kill.
+        $me = $this->snake('me', [
+            ['x' => 3, 'y' => 0], // head
+            ['x' => 3, 'y' => 1],
+            ['x' => 3, 'y' => 2],
+            ['x' => 3, 'y' => 3],
+        ]);
+        $enemy = $this->snake('foe', [
+            ['x' => 0, 'y' => 1], // head
+            ['x' => 0, 'y' => 2],
+            ['x' => 1, 'y' => 2],
+            ['x' => 1, 'y' => 1],
+            ['x' => 2, 'y' => 1],
+            ['x' => 2, 'y' => 2],
+        ], health: 100);
+        $state = [
+            'turn'  => 0,
+            'board' => $this->board([$me, $enemy]),
+            'you'   => $me,
+        ];
+
+        mt_srand(7);
+        $score = Safety::singleRollout($state, 'left', 5);
+
+        // survived (~5) + kills (≥1) × 10 ⇒ > 10. Without killshot detection
+        // the rollout would just see "enemy keeps moving" and never credit
+        // the kill until depth ran out, capping the score at survived.
+        $this->assertGreaterThan(10.0, $score,
+            'rollout must credit a kill when the enemy is forced into area < length');
+    }
+
+    #[Test]
     public function regression_game_86b92eaf_turn_52_mcts_picks_down_over_right(): void
     {
         // Same state as the ranker test above, but evaluated through MCTS.
