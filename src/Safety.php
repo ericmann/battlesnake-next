@@ -204,9 +204,18 @@ final class Safety
             // Normal mode: optional food bonus, weighted by hunger and
             // length deficit (the two conditions where eating is worth
             // the body growth).
+            //
+            // Hunger weight saturates at 1.0 (we can't be more hungry than
+            // health=0). Length deficit is *not* capped: a snake 8 behind
+            // the field needs food much harder than a snake 2 behind, and
+            // capping at 1.0 made our small snake just drift while a
+            // length-14 opponent kept eating. The cap on growth comes from
+            // the deficit formula itself going negative once we're 2+
+            // longer than the field — so unbounded weight here doesn't
+            // mean unbounded growth, just stronger pull while behind.
             $hungerWeight = max(0.0, (60.0 - $myHealth) / 60.0);
             $lengthDeficitWeight = max(0.0, ($maxEnemyLen + 2 - $myLen) / 5.0);
-            $foodWeight = min(1.0, max($hungerWeight, $lengthDeficitWeight));
+            $foodWeight = max($hungerWeight, $lengthDeficitWeight);
 
             $foodCells = $board['food'] ?? [];
             if ($foodWeight > 0.0 && $foodCells !== []) {

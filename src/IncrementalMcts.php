@@ -84,4 +84,23 @@ final class IncrementalMcts
     {
         return array_sum($this->counts);
     }
+
+    /**
+     * Mean rollout score for a specific move, or null if it hasn't been
+     * sampled yet. Used by the Decider's MCTS sanity gate to compare a
+     * proposed LLM pick against MCTS's own preference.
+     */
+    public function meanFor(string $move): ?float
+    {
+        if (!isset($this->counts[$move]) || $this->counts[$move] === 0) {
+            return null;
+        }
+        return $this->totals[$move] / $this->counts[$move];
+    }
+
+    /** Rollout count for a specific move (0 if untouched). */
+    public function countFor(string $move): int
+    {
+        return $this->counts[$move] ?? 0;
+    }
 }

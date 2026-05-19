@@ -668,6 +668,56 @@ final class SafetyTest extends TestCase
     }
 
     #[Test]
+    public function regression_game_31096029_turn_82_avoids_advancing_toward_longer_enemy(): void
+    {
+        // Real failure (length-6 self vs length-14 enemy). At turn 82 the
+        // snake had three legal moves: 'down', 'left', 'right'. It picked
+        // 'right' toward the longer enemy and got boxed into a forced
+        // head-on two turns later. With the uncapped length-deficit
+        // weighting and MCTS lookahead, the ranker (and MCTS) must not
+        // pick 'right' from this state.
+        $me = $this->snake('me', [
+            ['x' => 3, 'y' => 7], // head
+            ['x' => 3, 'y' => 8],
+            ['x' => 4, 'y' => 8],
+            ['x' => 5, 'y' => 8],
+            ['x' => 6, 'y' => 8],
+            ['x' => 7, 'y' => 8],
+        ], health: 100);
+        $enemy = $this->snake('foe', [
+            ['x' => 6, 'y' => 6], ['x' => 7, 'y' => 6], ['x' => 7, 'y' => 7],
+            ['x' => 7, 'y' => 8], ['x' => 7, 'y' => 9], ['x' => 7, 'y' => 10],
+            ['x' => 8, 'y' => 10], ['x' => 9, 'y' => 10], ['x' => 10, 'y' => 10],
+            ['x' => 10, 'y' => 9], ['x' => 9, 'y' => 9], ['x' => 9, 'y' => 8],
+            ['x' => 10, 'y' => 8], ['x' => 10, 'y' => 7],
+        ], health: 91);
+        // Note: me body[5] (7,8) overlaps enemy body[3] (7,8) in this
+        // reconstruction — the snake helper just stores cells, it doesn't
+        // validate non-overlap. Drop the trailing overlap to keep the
+        // ranker honest about my actual occupancy.
+        $me['body'] = [
+            ['x' => 3, 'y' => 7],
+            ['x' => 3, 'y' => 8],
+            ['x' => 4, 'y' => 8],
+            ['x' => 5, 'y' => 8],
+            ['x' => 6, 'y' => 8],
+            ['x' => 6, 'y' => 9],
+        ];
+        $me['length'] = 6;
+
+        $board = $this->board(
+            [$me, $enemy],
+            food: [['x' => 5, 'y' => 9], ['x' => 3, 'y' => 2], ['x' => 6, 'y' => 0]],
+        );
+
+        $scored = Safety::legalMovesWithSpace($me, $board);
+
+        $this->assertArrayHasKey('right', $scored);
+        $this->assertNotSame('right', array_key_first($scored),
+            'must not advance toward a length-14 enemy when we are length 6');
+    }
+
+    #[Test]
     public function rollout_credits_kill_when_enemy_area_drops_below_length(): void
     {
         // A length-6 enemy is curled into the bottom-left such that they

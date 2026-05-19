@@ -185,6 +185,74 @@ final class DeciderTest extends TestCase
     }
 
     #[Test]
+    public function decision_rejects_llm_pick_that_mcts_strongly_dislikes(): void
+    {
+        // Game 86b92eaf turn 52: length-4 self at (2,10) walks 'right'
+        // toward a length-8 enemy and dies two turns later in a forced
+        // head-on. The area-gate ratio between the two legal moves is
+        // < 4× so it passes that gate, but MCTS rollouts give 'down' a
+        // ~3.6 turns higher mean than 'right'. The MCTS gate must trip.
+        $me = [
+            'id'     => 'me', 'name' => 'me',
+            'health' => 71, 'length' => 4,
+            'head'   => ['x' => 2, 'y' => 10],
+            'body'   => [
+                ['x' => 2, 'y' => 10], ['x' => 1, 'y' => 10],
+                ['x' => 1, 'y' => 9],  ['x' => 0, 'y' => 9],
+            ],
+        ];
+        $foe = [
+            'id'     => 'foe', 'name' => 'foe',
+            'health' => 96, 'length' => 8,
+            'head'   => ['x' => 5, 'y' => 9],
+            'body'   => [
+                ['x' => 5, 'y' => 9], ['x' => 6, 'y' => 9], ['x' => 6, 'y' => 8],
+                ['x' => 7, 'y' => 8], ['x' => 8, 'y' => 8], ['x' => 8, 'y' => 7],
+                ['x' => 8, 'y' => 6], ['x' => 8, 'y' => 5],
+            ],
+        ];
+        $state = [
+            'turn'  => 52,
+            'board' => [
+                'width' => 11, 'height' => 11,
+                'food' => [], 'hazards' => [],
+                'snakes' => [$me, $foe],
+            ],
+            'you' => $me,
+        ];
+
+        $safeMoves = ['down', 'right'];
+        $space     = ['down' => 41, 'right' => 42]; // < 4× ratio — area gate passes
+
+        $mcts = new IncrementalMcts($state, $safeMoves, depth: 25);
+        mt_srand(42);
+        for ($i = 0; $i < 300; $i++) {
+            $mcts->runOne();
+        }
+        // Sanity-check the MCTS state before we run the Decider — the test
+        // only proves the gate if MCTS actually disagrees by > DELTA.
+        $this->assertSame('down', $mcts->best(), 'precondition: MCTS prefers down');
+
+        $llm = new FakeLlmDriver(
+            result: new RaceResult('right', 'advance on enemy', 'fake', 'secondary', 50),
+            arrivesOnStep: 1,
+        );
+        $decision = (new Decider(
+            llm:            $llm,
+            mcts:           $mcts,
+            safeMoves:      $safeMoves,
+            decisionMs:     5,
+            sleepMicros:    100,
+            safeMovesSpace: $space,
+        ))->decide();
+
+        $this->assertNotSame('right', $decision->move,
+            'MCTS rollouts saw right as a trap; gate must override the LLM');
+        $this->assertSame('mcts', $decision->strategy,
+            'gate trip should fall through to MCTS, which prefers down');
+    }
+
+    #[Test]
     public function decision_respects_deadline_within_reasonable_slack(): void
     {
         $state     = $this->state();

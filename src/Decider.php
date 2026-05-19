@@ -21,11 +21,18 @@ namespace BattlesnakeAI;
  *               2. MCTS if at least one rollout completed
  *               3. flood-fill winner (always available)
  *
- * Sanity gate (only active when $safeMovesSpace is provided): if the LLM's
- * pick has dramatically less flood-fill space than the winner — the most
- * common failure mode of the small fallback model, which will cheerfully pick
- * a 1-cell pocket while *claiming* "maximize open space" — the gate discards
- * the LLM result and lets MCTS or flood-fill take over.
+ * Two sanity gates run on the LLM's pick before it wins:
+ *   1. Area-control gate (only active when $safeMovesSpace is provided):
+ *      if the LLM picked a move with dramatically less area than the
+ *      winner, it's almost certainly a hallucination (small-model favourite
+ *      failure mode: pick a 1-cell pocket while *claiming* "maximize open
+ *      space"). Reject.
+ *   2. MCTS gate: if MCTS rollouts have sampled both the LLM's pick and
+ *      MCTS's own best, and the LLM's pick scores much worse, the rollouts
+ *      saw a multi-turn trap the area-control gate can't see. Reject.
+ *
+ * When either gate trips, the LLM is discarded and MCTS / flood-fill
+ * take over.
  *
  * The class is intentionally injection-friendly: callers pass a built
  * LlmDriver and IncrementalMcts. Production wires CurlMultiLlmDriver +
@@ -35,12 +42,29 @@ namespace BattlesnakeAI;
 final class Decider
 {
     /**
-     * Sanity-gate threshold: reject the LLM if the winner's flood-fill space
+     * Area-gate threshold: reject the LLM if the winner's flood-fill space
      * is at least this many times the LLM's pick. Tuned to catch the
      * "1-cell-pocket vs 33-cell-room" blunder while still letting the LLM
      * make tight-but-legitimate tactical picks (within ~4× of the winner).
      */
     private const SANITY_GATE_RATIO = 4;
+
+    /**
+     * MCTS-gate threshold: reject the LLM if MCTS's best move scores at
+     * least this much better than the LLM's pick in mean rollout score,
+     * AND both have been sampled enough times to be trustworthy. The unit
+     * is "extra survival turns + kill bonuses". 3 is roughly "MCTS rollouts
+     * see the LLM's pick dying ~3 turns earlier on average" — meaningful
+     * but not so noisy that legitimate tactical picks get overridden.
+     */
+    private const MCTS_GATE_DELTA = 3.0;
+
+    /**
+     * Minimum samples per move before the MCTS gate is willing to act on
+     * the comparison. A single rollout has too much variance to base a
+     * decision on; require at least this many before trusting the mean.
+     */
+    private const MCTS_GATE_MIN_SAMPLES = 3;
 
     /**
      * @param list<string>            $safeMoves       Non-empty, sorted by flood-fill score.
@@ -111,6 +135,12 @@ final class Decider
             // result and let MCTS / flood-fill answer instead.
             $llmResult = null;
         }
+        if ($llmResult !== null && $this->mctsStronglyDisagrees($llmResult->move)) {
+            // The LLM's pick survived the area check but MCTS rollouts saw
+            // a much-better alternative — usually a multi-turn trap the
+            // area gate can't see (advance toward longer enemy, etc.).
+            $llmResult = null;
+        }
 
         if ($llmResult !== null) {
             return Decision::llm($llmResult, $this->mcts->rolloutCount(), $totalMs);
@@ -120,6 +150,37 @@ final class Decider
             return Decision::mcts($mctsBest, $this->mcts->rolloutCount(), $totalMs);
         }
         return Decision::floodFill($ffMove, $totalMs);
+    }
+
+    private function mctsStronglyDisagrees(string $llmMove): bool
+    {
+        $mctsBest = $this->mcts->best();
+        if ($mctsBest === null || $mctsBest === $llmMove) {
+            return false; // no MCTS opinion, or it agrees
+        }
+        $llmMean  = $this->mcts->meanFor($llmMove);
+        $bestMean = $this->mcts->meanFor($mctsBest);
+        if ($llmMean === null || $bestMean === null) {
+            return false; // one or both untouched
+        }
+        // Require both moves to have enough samples that the means aren't
+        // dominated by one lucky rollout.
+        $minSamples = min($this->mcts->countFor($llmMove), $this->mcts->countFor($mctsBest));
+        if ($minSamples < self::MCTS_GATE_MIN_SAMPLES) {
+            return false;
+        }
+        if ($bestMean - $llmMean < self::MCTS_GATE_DELTA) {
+            return false; // close enough; trust the LLM
+        }
+        Logger::warn('llm pick rejected: mcts rollouts strongly prefer a different move', [
+            'llm_move'    => $llmMove,
+            'llm_mean'    => $llmMean,
+            'mcts_move'   => $mctsBest,
+            'mcts_mean'   => $bestMean,
+            'samples_min' => $minSamples,
+            'gate_delta'  => self::MCTS_GATE_DELTA,
+        ]);
+        return true;
     }
 
     private function isSuicidalLlmPick(string $llmMove, string $ffMove): bool
