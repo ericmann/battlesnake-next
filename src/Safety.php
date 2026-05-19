@@ -257,6 +257,40 @@ final class Safety
     private const FOOD_BONUS = 30.0;
 
     /**
+     * Set of direction names whose landing cell is a food cell, for the
+     * Decider's MCTS-gate food-protect. Cheap: one direction lookup per
+     * cardinal direction. Returns an array keyed by direction so callers
+     * can isset() into it cleanly.
+     *
+     * @return array<string,bool>
+     */
+    public static function movesEatingFood(array $me, array $board): array
+    {
+        $width  = (int) ($board['width']  ?? 0);
+        $height = (int) ($board['height'] ?? 0);
+        $foodCells = [];
+        foreach ($board['food'] ?? [] as $f) {
+            $foodCells[self::key((int) $f['x'], (int) $f['y'])] = true;
+        }
+        if ($foodCells === []) {
+            return [];
+        }
+        $head = $me['head'];
+        $eating = [];
+        foreach (self::DIRECTIONS as $dir => [$dx, $dy]) {
+            $nx = (int) $head['x'] + $dx;
+            $ny = (int) $head['y'] + $dy;
+            if ($nx < 0 || $nx >= $width || $ny < 0 || $ny >= $height) {
+                continue;
+            }
+            if (isset($foodCells[self::key($nx, $ny)])) {
+                $eating[$dir] = true;
+            }
+        }
+        return $eating;
+    }
+
+    /**
      * Multi-source BFS from every food cell, returning the distance from
      * the nearest food to every reachable cell on the board. Used by the
      * ranker to score food proximity per candidate.

@@ -253,6 +253,83 @@ final class DeciderTest extends TestCase
     }
 
     #[Test]
+    public function regression_game_a98ab26c_turn_140_eats_food_despite_mcts_disagreement(): void
+    {
+        // Real game: length-6 self at (8,8) with food at (9,8) — one step
+        // right. The food-aware ranker correctly picks 'right' (large food
+        // bonus from length deficit and immediate adjacency). But MCTS
+        // rollouts of 'right' average lower than 'down' because eating
+        // grows the snake and a longer random walk self-collides more
+        // often. The MCTS gate would override the food pick. Food-protect
+        // must keep 'right' as the winner.
+        $me = [
+            'id'     => 'me', 'name' => 'me',
+            'health' => 71, 'length' => 6,
+            'head'   => ['x' => 8, 'y' => 8],
+            'body'   => [
+                ['x' => 8, 'y' => 8], ['x' => 7, 'y' => 8], ['x' => 6, 'y' => 8],
+                ['x' => 6, 'y' => 7], ['x' => 7, 'y' => 7], ['x' => 7, 'y' => 6],
+            ],
+        ];
+        $foe = [
+            'id'     => 'foe', 'name' => 'foe',
+            'health' => 95, 'length' => 18,
+            'head'   => ['x' => 7, 'y' => 3],
+            'body'   => [
+                ['x' => 7, 'y' => 3], ['x' => 6, 'y' => 3], ['x' => 5, 'y' => 3],
+                ['x' => 4, 'y' => 3], ['x' => 3, 'y' => 3], ['x' => 3, 'y' => 4],
+                ['x' => 4, 'y' => 4], ['x' => 4, 'y' => 5], ['x' => 4, 'y' => 6],
+                ['x' => 4, 'y' => 7], ['x' => 3, 'y' => 7], ['x' => 3, 'y' => 8],
+                ['x' => 3, 'y' => 9], ['x' => 2, 'y' => 9], ['x' => 1, 'y' => 9],
+                ['x' => 1, 'y' => 8], ['x' => 0, 'y' => 8], ['x' => 0, 'y' => 7],
+            ],
+        ];
+        $state = [
+            'turn'  => 140,
+            'board' => [
+                'width' => 11, 'height' => 11,
+                'food' => [
+                    ['x' => 9, 'y' => 8], ['x' => 10, 'y' => 8],
+                    ['x' => 9, 'y' => 5], ['x' => 6, 'y' => 10],
+                ],
+                'hazards' => [],
+                'snakes' => [$me, $foe],
+            ],
+            'you' => $me,
+        ];
+        $safeMoves = ['right', 'down', 'up'];      // ranker order from real run
+        $space     = ['right' => 31, 'down' => 36, 'up' => 29];
+        $foodMoves = ['right' => true];            // 'right' lands on (9,8)
+
+        // Seed MCTS such that it strongly prefers 'down' — exactly the
+        // pattern that triggered the bug in production.
+        $mcts = new IncrementalMcts($state, $safeMoves, depth: 25);
+        mt_srand(42);
+        for ($i = 0; $i < 300; $i++) {
+            $mcts->runOne();
+        }
+        $this->assertSame('down', $mcts->best(), 'precondition: MCTS would normally veto right');
+
+        $llm = new FakeLlmDriver(
+            result: new RaceResult('right', 'eat to grow', 'fake', 'primary', 50),
+            arrivesOnStep: 1,
+        );
+        $decision = (new Decider(
+            llm:            $llm,
+            mcts:           $mcts,
+            safeMoves:      $safeMoves,
+            decisionMs:     5,
+            sleepMicros:    100,
+            safeMovesSpace: $space,
+            foodMoves:      $foodMoves,
+        ))->decide();
+
+        $this->assertSame('right', $decision->move,
+            'food-protect must keep the eating move even when MCTS disagrees');
+        $this->assertSame('llm', $decision->strategy);
+    }
+
+    #[Test]
     public function decision_respects_deadline_within_reasonable_slack(): void
     {
         $state     = $this->state();

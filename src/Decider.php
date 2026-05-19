@@ -81,6 +81,13 @@ final class Decider
      *                                                 present, enables the sanity gate on
      *                                                 LLM picks. Pass `null` (the test
      *                                                 default) to disable the gate.
+     * @param array<string,bool>      $foodMoves       Optional map of moves whose landing
+     *                                                 cell is a food cell. When the LLM
+     *                                                 picks one of these, the MCTS gate is
+     *                                                 disarmed — MCTS rollouts undervalue
+     *                                                 growth, but the food-aware ranker
+     *                                                 already weighed whether eating is
+     *                                                 worth it. Empty by default.
      */
     public function __construct(
         private readonly LlmDriver        $llm,
@@ -89,6 +96,7 @@ final class Decider
         private readonly int              $decisionMs = 400,
         private readonly int              $sleepMicros = 1000,
         private readonly ?array           $safeMovesSpace = null,
+        private readonly array            $foodMoves = [],
     ) {
         if ($safeMoves === []) {
             throw new \InvalidArgumentException('safeMoves must not be empty');
@@ -135,7 +143,7 @@ final class Decider
             // result and let MCTS / flood-fill answer instead.
             $llmResult = null;
         }
-        if ($llmResult !== null && $this->mctsStronglyDisagrees($llmResult->move)) {
+        if ($llmResult !== null && $this->mctsStronglyDisagrees($llmResult->move, $ffMove)) {
             // The LLM's pick survived the area check but MCTS rollouts saw
             // a much-better alternative — usually a multi-turn trap the
             // area gate can't see (advance toward longer enemy, etc.).
@@ -152,8 +160,16 @@ final class Decider
         return Decision::floodFill($ffMove, $totalMs);
     }
 
-    private function mctsStronglyDisagrees(string $llmMove): bool
+    private function mctsStronglyDisagrees(string $llmMove, string $rankerTop): bool
     {
+        if (isset($this->foodMoves[$llmMove])) {
+            // The LLM stepped directly onto a food cell. MCTS rollouts
+            // systematically undervalue eating — a random-walk rollout
+            // with a longer body self-collides more often, so growing
+            // looks "dangerous" in the score. The food-aware ranker
+            // already weighed hunger and length deficit; trust it.
+            return false;
+        }
         $mctsBest = $this->mcts->best();
         if ($mctsBest === null || $mctsBest === $llmMove) {
             return false; // no MCTS opinion, or it agrees
