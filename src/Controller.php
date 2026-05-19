@@ -74,14 +74,18 @@ final class Controller
 
         // ----- 2. Safety filter -------------------------------------------
         try {
-            $safeMoves = Safety::legalMoves($me, $state['board']);
+            $safeMovesSpace = Safety::legalMovesWithSpace($me, $state['board']);
         } catch (\Throwable $e) {
             Logger::warn('safety layer threw', ['err' => $e->getMessage()]);
             return [200, ['move' => 'up', 'shout' => 'this is fine']];
         }
+        $safeMoves = array_keys($safeMovesSpace);
 
         // ----- 3. Render board for the LLM --------------------------------
-        $prompt = Board::format($state, $safeMoves);
+        // Pass the scored map so the prompt shows "down(33), left(33), right(1)"
+        // — the small fallback model can otherwise miss the cliff between
+        // "legal" and "1-cell pocket".
+        $prompt = Board::format($state, $safeMovesSpace);
 
         // ----- 4. Build the LLM driver (or a no-op when no key) -----------
         $apiKey = Env::str('OPENROUTER_API_KEY');
@@ -107,11 +111,12 @@ final class Controller
         // would still respect this — but no LLM means we'd rather burn
         // CPU on rollouts, so drop the sleep in that case.
         $decision = (new Decider(
-            llm:         $llm,
-            mcts:        new IncrementalMcts($state, $safeMoves),
-            safeMoves:   $safeMoves,
-            decisionMs:  Env::int('DECISION_MS', 450),
-            sleepMicros: $hasKey ? 1000 : 0,
+            llm:            $llm,
+            mcts:           new IncrementalMcts($state, $safeMoves),
+            safeMoves:      $safeMoves,
+            decisionMs:     Env::int('DECISION_MS', 450),
+            sleepMicros:    $hasKey ? 1000 : 0,
+            safeMovesSpace: $safeMovesSpace,
         ))->decide();
 
         // ----- 6. Log + return --------------------------------------------

@@ -35,11 +35,16 @@ namespace BattlesnakeAI;
 final class Board
 {
     /**
-     * @param array       $state     The full Battlesnake /move payload.
-     * @param list<string> $safeMoves Optional pre-computed legal-moves list to
-     *                                splice into the metadata block. Helps the
-     *                                LLM stick to legal answers instead of
-     *                                inventing fatal ones.
+     * @param array $state     The full Battlesnake /move payload.
+     * @param array $safeMoves Optional pre-computed legal-moves data. Two
+     *                         accepted shapes:
+     *                           - list<string>        — direction names only
+     *                           - array<string,int>   — direction → flood-fill
+     *                                                   space (sorted desc)
+     *                         The scored form gets the magnitudes spliced into
+     *                         the prompt so the LLM can see how cramped each
+     *                         option is. The plain-list form is kept for tests
+     *                         and ad-hoc callers.
      */
     public static function format(array $state, array $safeMoves = []): string
     {
@@ -221,8 +226,21 @@ final class Board
         $lines[] = "Food on board: {$foodCount}   Hazards: {$hazardCount}";
 
         if ($safeMoves !== []) {
-            $lines[] = 'Legal moves (pre-filtered, sorted by open space): '
-                . implode(', ', $safeMoves);
+            if (array_is_list($safeMoves)) {
+                $lines[] = 'Legal moves (pre-filtered, sorted by open space): '
+                    . implode(', ', $safeMoves);
+            } else {
+                // Scored form: "down(33), left(33), right(1)" — the magnitudes
+                // matter, not just the order. A 1-cell pocket and a 30-cell
+                // room both come out as "legal", but reading the integers
+                // makes the difference impossible to ignore.
+                $parts = [];
+                foreach ($safeMoves as $move => $space) {
+                    $parts[] = "{$move}({$space})";
+                }
+                $lines[] = 'Legal moves (sorted by reachable-cell count in parens): '
+                    . implode(', ', $parts);
+            }
         }
 
         return implode("\n", $lines);

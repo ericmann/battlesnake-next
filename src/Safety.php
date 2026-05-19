@@ -40,16 +40,34 @@ final class Safety
      * something to send back. The MCTS layer is then free to pick a different
      * one if it likes its odds.
      *
+     * Thin wrapper around legalMovesWithSpace(): callers that only need the
+     * direction names get a list; callers that need the magnitudes (Decider's
+     * sanity gate, Board's prompt renderer) can call the scored variant.
+     *
      * @param array $me    The "you" object from the Battlesnake payload.
      * @param array $board The "board" object from the Battlesnake payload.
      * @return list<string> A non-empty subset of {up, down, left, right}.
      */
     public static function legalMoves(array $me, array $board): array
     {
+        return array_keys(self::legalMovesWithSpace($me, $board));
+    }
+
+    /**
+     * Same legal-move computation as legalMoves() but returns the per-move
+     * flood-fill space score alongside the direction name.
+     *
+     * @return array<string,int> Map of direction → reachable-cell count, sorted
+     *                           descending by space. Guaranteed non-empty. When
+     *                           every move is fatal, the single entry has a
+     *                           score of 0 — caller can detect "everything is
+     *                           dead" without a separate flag.
+     */
+    public static function legalMovesWithSpace(array $me, array $board): array
+    {
         $width  = (int) $board['width'];
         $height = (int) $board['height'];
         $head   = $me['head'];
-        $myLen  = (int) $me['length'];
 
         // Build the occupancy map for "next turn": a set of cells we cannot
         // safely enter. Every snake's body except the tail is blocked. The
@@ -97,25 +115,19 @@ final class Safety
                 continue;
             }
 
-            $space = self::floodFill(['x' => $nx, 'y' => $ny], $blocked, $width, $height);
-
-            // Anything is included; sort by space below. We tag tight spaces
-            // (smaller than half our length) so the LLM/MCTS can see they're
-            // claustrophobic but they're not auto-rejected — being trapped in
-            // a 4-cell room is still better than walking into a wall.
-            $candidates[$dir] = $space;
+            $candidates[$dir] = self::floodFill(['x' => $nx, 'y' => $ny], $blocked, $width, $height);
         }
 
         if ($candidates === []) {
             // Every direction is a wall, body, or head-on loss. Return the
             // least-bad option (head-on coin flip > guaranteed death). If even
             // that doesn't exist, default to "up" — we're dead either way.
-            return [$fallback ?? 'up'];
+            return [($fallback ?? 'up') => 0];
         }
 
         // Sort descending by reachable cells. Stable order on ties is fine.
         arsort($candidates);
-        return array_keys($candidates);
+        return $candidates;
     }
 
     /**

@@ -57,10 +57,20 @@ TAIL VACATE RULE
 
 PRE-FILTERED LEGAL MOVES
 The metadata block lists "Legal moves" already filtered through a flood-fill
-safety check, sorted by open-space score (most space first). DO NOT pick a
-move that is not on this list. The first entry is the safest by space; you
-may deviate to chase food, kills, or board control, but you must stay within
-the listed options.
+safety check. Each entry has a parenthesised integer — the number of cells
+reachable from that direction (your "room to live"). Moves are sorted with
+the most space first. DO NOT pick a move that is not on this list.
+
+INTERPRETING THE SPACE NUMBER
+- A space of 1 or 2 is a dead-end pocket — moving there is a suicide pick,
+  even when listed as legal. Only choose it if every other option is also
+  tiny.
+- A space smaller than your own length means you will trap yourself within
+  a few turns. Avoid unless food in that pocket can save you.
+- If two moves are close in space, prefer the one that maintains board
+  control (chasing food, cutting off enemies). The first entry is the
+  safest by space; deviating is fine when the gap to the next option is
+  small, but never deviate from N cells to "right(1)".
 
 STRATEGIC PRIORITIES (apply in order; break ties with later items)
   1. Never make an immediately fatal move. Stay within the listed legal moves.
