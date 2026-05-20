@@ -117,7 +117,8 @@ final class Controller
             decisionMs:     Env::int('DECISION_MS', 450),
             sleepMicros:    $hasKey ? 1000 : 0,
             safeMovesSpace: $safeMovesSpace,
-            foodMoves:      Safety::movesEatingFood($me, $state['board']),
+            foodMoves:        Safety::movesEatingFood($me, $state['board']),
+            headOnLossMoves:  Safety::headOnLossMoves($me, $state['board']),
         ))->decide();
 
         // ----- 6. Log + return --------------------------------------------

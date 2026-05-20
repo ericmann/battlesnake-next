@@ -88,6 +88,12 @@ final class Decider
      *                                                 growth, but the food-aware ranker
      *                                                 already weighed whether eating is
      *                                                 worth it. Empty by default.
+     * @param array<string,bool>      $headOnLossMoves Optional map of moves whose landing
+     *                                                 cell is a head-on loss against an
+     *                                                 equal-or-larger enemy. Enables the
+     *                                                 head-on-mismatch gate: reject the
+     *                                                 LLM when its head-on-vs-safe call
+     *                                                 disagrees with the ranker's top.
      */
     public function __construct(
         private readonly LlmDriver        $llm,
@@ -97,6 +103,7 @@ final class Decider
         private readonly int              $sleepMicros = 1000,
         private readonly ?array           $safeMovesSpace = null,
         private readonly array            $foodMoves = [],
+        private readonly array            $headOnLossMoves = [],
     ) {
         if ($safeMoves === []) {
             throw new \InvalidArgumentException('safeMoves must not be empty');
@@ -141,6 +148,14 @@ final class Decider
             // The LLM picked a move so cramped that the small fallback model
             // almost certainly hallucinated its own reasoning. Toss the
             // result and let MCTS / flood-fill answer instead.
+            $llmResult = null;
+        }
+        if ($llmResult !== null && $this->headOnMismatch($llmResult->move, $ffMove)) {
+            // The LLM and the ranker disagree about whether to take a
+            // head-on gamble — either the LLM is walking into a longer
+            // enemy when a safe option exists, or it's playing safe into
+            // a death-trap that the ranker correctly flagged. Either way,
+            // trust the ranker.
             $llmResult = null;
         }
         if ($llmResult !== null && $this->mctsStronglyDisagrees($llmResult->move, $ffMove)) {
@@ -195,6 +210,25 @@ final class Decider
             'mcts_mean'   => $bestMean,
             'samples_min' => $minSamples,
             'gate_delta'  => self::MCTS_GATE_DELTA,
+        ]);
+        return true;
+    }
+
+    private function headOnMismatch(string $llmMove, string $rankerTop): bool
+    {
+        if ($this->headOnLossMoves === []) {
+            return false; // gate disabled (no head-on candidates this turn)
+        }
+        $llmIsHeadOn    = isset($this->headOnLossMoves[$llmMove]);
+        $rankerIsHeadOn = isset($this->headOnLossMoves[$rankerTop]);
+        if ($llmIsHeadOn === $rankerIsHeadOn) {
+            return false; // both sides agree — head-on vs safe, or both safe
+        }
+        Logger::warn('llm pick rejected: head-on mismatch with ranker', [
+            'llm_move'          => $llmMove,
+            'llm_is_head_on'    => $llmIsHeadOn,
+            'ranker_top'        => $rankerTop,
+            'ranker_is_head_on' => $rankerIsHeadOn,
         ]);
         return true;
     }

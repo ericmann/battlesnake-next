@@ -281,6 +281,33 @@ final class Safety
     private const HEAD_ON_DISCOUNT = 0.5;
 
     /**
+     * Set of direction names whose landing cell would be a head-on loss
+     * against an equal-or-larger enemy. Used by the Decider so it can spot
+     * an LLM that disagrees with the ranker about whether to take a head-on
+     * gamble.
+     *
+     * @return array<string,bool>
+     */
+    public static function headOnLossMoves(array $me, array $board): array
+    {
+        $width  = (int) ($board['width']  ?? 0);
+        $height = (int) ($board['height'] ?? 0);
+        $head   = $me['head'];
+        $out    = [];
+        foreach (self::DIRECTIONS as $dir => [$dx, $dy]) {
+            $nx = (int) $head['x'] + $dx;
+            $ny = (int) $head['y'] + $dy;
+            if ($nx < 0 || $nx >= $width || $ny < 0 || $ny >= $height) {
+                continue;
+            }
+            if (self::headToHeadLoss($nx, $ny, $me, $board['snakes'])) {
+                $out[$dir] = true;
+            }
+        }
+        return $out;
+    }
+
+    /**
      * Set of direction names whose landing cell is a food cell, for the
      * Decider's MCTS-gate food-protect. Cheap: one direction lookup per
      * cardinal direction. Returns an array keyed by direction so callers

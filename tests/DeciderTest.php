@@ -330,6 +330,130 @@ final class DeciderTest extends TestCase
     }
 
     #[Test]
+    public function head_on_mismatch_gate_rejects_llm_picking_head_on_when_ranker_chose_safe(): void
+    {
+        // Ranker top = 'left' (safe). LLM picks 'down' (head-on loss).
+        // Raw area: down=42 > left=36, ratio 1.17 — area gate passes.
+        // head-on-mismatch gate must catch it.
+        $state     = $this->state();
+        $safeMoves = ['left', 'down'];
+        $space     = ['left' => 36, 'down' => 42];
+        $llm       = new FakeLlmDriver(
+            result: new RaceResult('down', 'maximize space', 'fake', 'primary', 50),
+            arrivesOnStep: 1,
+        );
+
+        $decision = (new Decider(
+            llm:             $llm,
+            mcts:            new IncrementalMcts($state, $safeMoves),
+            safeMoves:       $safeMoves,
+            decisionMs:      30,
+            sleepMicros:     100,
+            safeMovesSpace:  $space,
+            headOnLossMoves: ['down' => true],
+        ))->decide();
+
+        $this->assertNotSame('down', $decision->move,
+            'gate must reject LLM picking head-on when ranker chose safe');
+        $this->assertNotSame('llm', $decision->strategy);
+    }
+
+    #[Test]
+    public function head_on_mismatch_gate_passes_when_both_llm_and_ranker_pick_head_on(): void
+    {
+        // Both ranker top and LLM choose a head-on gamble (e.g. the only
+        // alternative is an even worse corner trap). Gate must NOT fire.
+        // Use 'up' (not 'down') — the default fixture's body goes downward,
+        // so 'down' would be an immediate self-collision and MCTS would score
+        // it 0, causing the MCTS gate to fire before we can test this gate.
+        $state     = $this->state();
+        $safeMoves = ['up', 'left'];   // ranker chose 'up' (head-on gamble, combined > left)
+        $space     = ['up' => 42, 'left' => 5];
+        $llm       = new FakeLlmDriver(
+            result: new RaceResult('up', 'gamble head-on vs shorter', 'fake', 'primary', 50),
+            arrivesOnStep: 1,
+        );
+
+        $decision = (new Decider(
+            llm:             $llm,
+            mcts:            new IncrementalMcts($state, $safeMoves),
+            safeMoves:       $safeMoves,
+            decisionMs:      30,
+            sleepMicros:     100,
+            safeMovesSpace:  $space,
+            headOnLossMoves: ['up' => true],
+        ))->decide();
+
+        // Both chose head-on — gate should not interfere; LLM wins.
+        $this->assertSame('llm',  $decision->strategy,
+            'gate must not fire when LLM and ranker both chose head-on');
+        $this->assertSame('up', $decision->move);
+    }
+
+    #[Test]
+    public function regression_game_abd38e9b_turn_42_rejects_head_on_down_in_favor_of_safe_left(): void
+    {
+        // T42: me (4,6) length 5. Ranker top: left (area 36, safe).
+        // Enemy Slim at (4,5) length 9 — going down is a head-on loss.
+        // Raw area: down=42, left=36 (ratio 1.17 < SANITY_GATE_RATIO=4) — area gate
+        // passes, but the head-on-mismatch gate must catch it.
+        $me = [
+            'id' => 'me', 'name' => 'me',
+            'health' => 80, 'length' => 5,
+            'head' => ['x' => 4, 'y' => 6],
+            'body' => [
+                ['x' => 4, 'y' => 6], ['x' => 4, 'y' => 7],
+                ['x' => 4, 'y' => 8], ['x' => 4, 'y' => 9],
+                ['x' => 4, 'y' => 10],
+            ],
+        ];
+        $slim = [
+            'id' => 'slim', 'name' => 'Slim',
+            'health' => 90, 'length' => 9,
+            'head' => ['x' => 4, 'y' => 5],
+            'body' => [
+                ['x' => 4, 'y' => 5], ['x' => 4, 'y' => 4],
+                ['x' => 4, 'y' => 3], ['x' => 4, 'y' => 2],
+                ['x' => 4, 'y' => 1], ['x' => 4, 'y' => 0],
+                ['x' => 3, 'y' => 0], ['x' => 3, 'y' => 1],
+                ['x' => 3, 'y' => 2],
+            ],
+        ];
+        $state = [
+            'turn' => 42,
+            'board' => [
+                'width' => 11, 'height' => 11,
+                'food' => [], 'hazards' => [],
+                'snakes' => [$me, $slim],
+            ],
+            'you' => $me,
+        ];
+
+        // Ranker combined-score sort: left first (safe 36 > head-on 42×0.5=21)
+        $safeMoves = ['left', 'down', 'right'];
+        $space     = ['left' => 36, 'down' => 42, 'right' => 10];
+
+        $llm = new FakeLlmDriver(
+            result: new RaceResult('down', 'advance toward enemy territory', 'fake', 'primary', 50),
+            arrivesOnStep: 1,
+        );
+        $decision = (new Decider(
+            llm:             $llm,
+            mcts:            new IncrementalMcts($state, $safeMoves),
+            safeMoves:       $safeMoves,
+            decisionMs:      30,
+            sleepMicros:     100,
+            safeMovesSpace:  $space,
+            headOnLossMoves: ['down' => true, 'right' => true],
+        ))->decide();
+
+        $this->assertNotSame('down', $decision->move,
+            'must not walk into Slim (len 9 vs me len 5) when left is safe');
+        $this->assertNotSame('llm', $decision->strategy,
+            'head-on-mismatch gate must demote LLM result');
+    }
+
+    #[Test]
     public function decision_respects_deadline_within_reasonable_slack(): void
     {
         $state     = $this->state();
