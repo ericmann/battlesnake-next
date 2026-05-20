@@ -751,6 +751,24 @@ final class Safety
             return 0.0;
         }
 
+        // Simultaneous-move guard: the real engine resolves all moves at once,
+        // but the rollout applies mine first. If we just landed adjacent to an
+        // equal-or-longer enemy head, that enemy could also move here — the
+        // loop below would wrongly call it a "trap kill" because our body now
+        // occupies the cell. Treat this as a loss (0) so MCTS correctly
+        // penalises moves that invite a forced head-on. Consistent with
+        // headToHeadLoss / HEAD_ON_DISCOUNT used by the ranker.
+        $rootHead = $mySnake['body'][0];
+        foreach ($enemies as $e) {
+            if ($e['length'] < $mySnake['length']) {
+                continue; // we're longer: head-on here is a win, not a loss
+            }
+            $eHead = $e['body'][0];
+            if (abs($eHead[0] - $rootHead[0]) + abs($eHead[1] - $rootHead[1]) === 1) {
+                return 0.0;
+            }
+        }
+
         $survived = 1;
         $kills    = 0;
         $killBonus = 10.0; // a kill is worth ten turns of survival

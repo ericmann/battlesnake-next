@@ -930,6 +930,55 @@ final class SafetyTest extends TestCase
     }
 
     #[Test]
+    public function regression_game_936fc968_turn_66_mcts_rollout_scores_forced_headon_as_loss(): void
+    {
+        // T66: Dead Reckoning (len 6) at (4,8). Enemy "this is a unique snake"
+        // (len 8) at (3,7) with ALL escape routes blocked — its only legal
+        // move is up to (3,8). Going left from (4,8) to (3,8) is a guaranteed
+        // head-on death.
+        //
+        // Bug (before fix): singleRollout('left') applied the root move first
+        // (putting our body at (3,8)), then tried to move the enemy — which
+        // now had no legal moves because (3,8) was occupied by us. The enemy
+        // was declared "trapped" and we got a false kill bonus (score ~11).
+        // MCTS would therefore agree with a suicidal LLM pick.
+        //
+        // After fix: the simultaneous-move guard detects that the enemy head
+        // (3,7) is adjacent to our new head (3,8) and that the enemy is longer
+        // — returns 0.0 immediately (death).
+        $me = $this->snake('me', [
+            ['x' => 4, 'y' => 8], ['x' => 4, 'y' => 7],
+            ['x' => 4, 'y' => 6], ['x' => 5, 'y' => 6],
+            ['x' => 5, 'y' => 5], ['x' => 6, 'y' => 5],
+        ], 71);
+        $enemy = $this->snake('enemy', [
+            ['x' => 3, 'y' => 7], ['x' => 3, 'y' => 6],
+            ['x' => 2, 'y' => 6], ['x' => 2, 'y' => 7],
+            ['x' => 2, 'y' => 8], ['x' => 2, 'y' => 9],
+            ['x' => 2, 'y' => 10], ['x' => 3, 'y' => 10],
+        ], 94);
+        $state = [
+            'turn'  => 66,
+            'board' => $this->board([$me, $enemy], food: [['x' => 0,'y' => 1],['x' => 1,'y' => 2],['x' => 3,'y' => 1],['x' => 10,'y' => 0]]),
+            'you'   => $me,
+        ];
+
+        // Rollout score for 'left' must be 0 (head-on loss), not ~11 (false kill).
+        $score = Safety::singleRollout($state, 'left', 20);
+        $this->assertSame(0.0, $score,
+            'rollout for forced head-on must return 0, not a false kill bonus');
+
+        // And MCTS must strongly prefer safe moves over left.
+        $mcts = new IncrementalMcts($state, ['up', 'right', 'left']);
+        mt_srand(42);
+        for ($i = 0; $i < 200; $i++) {
+            $mcts->runOne();
+        }
+        $this->assertNotSame('left', $mcts->best(),
+            'MCTS must not choose the forced head-on direction');
+    }
+
+    #[Test]
     public function mctsMove_returns_quickly_within_budget(): void
     {
         $me = $this->snake('me', [
