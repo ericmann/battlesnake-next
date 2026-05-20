@@ -221,8 +221,11 @@ final class Decider
         }
         $llmIsHeadOn    = isset($this->headOnLossMoves[$llmMove]);
         $rankerIsHeadOn = isset($this->headOnLossMoves[$rankerTop]);
-        if ($llmIsHeadOn === $rankerIsHeadOn) {
-            return false; // both sides agree — head-on vs safe, or both safe
+        // Only reject when the LLM gambled on a head-on that the ranker avoided.
+        // When the LLM picks safe and the ranker gambled (high-area head-on),
+        // the LLM is *correcting* the ranker — let it win.
+        if (!$llmIsHeadOn || $rankerIsHeadOn) {
+            return false;
         }
         Logger::warn('llm pick rejected: head-on mismatch with ranker', [
             'llm_move'          => $llmMove,

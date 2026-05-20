@@ -391,6 +391,38 @@ final class DeciderTest extends TestCase
     }
 
     #[Test]
+    public function head_on_mismatch_gate_passes_when_llm_picks_safe_and_ranker_gambled(): void
+    {
+        // Regression for game ae7d17cb / a6c3cf8b: ranker top = head-on 'up'
+        // (large raw area; 0.5 discount still enough to rank first), LLM
+        // correctly picks safe 'right'. The original bidirectional gate would
+        // reject the LLM's sane pick, fall through to flood_fill, and pick
+        // safeMoves[0] = 'up' — head-on death. Gate must be one-directional:
+        // only reject when the LLM gambled on head-on, not when it escaped one.
+        $state     = $this->state();
+        $safeMoves = ['up', 'right']; // ranker: up first (head-on area 42×0.5=21 > right 15)
+        $space     = ['up' => 42, 'right' => 15];
+        $llm       = new FakeLlmDriver(
+            result: new RaceResult('right', 'avoid head-on collision', 'fake', 'primary', 50),
+            arrivesOnStep: 1,
+        );
+
+        $decision = (new Decider(
+            llm:             $llm,
+            mcts:            new IncrementalMcts($state, $safeMoves),
+            safeMoves:       $safeMoves,
+            decisionMs:      30,
+            sleepMicros:     100,
+            safeMovesSpace:  $space,
+            headOnLossMoves: ['up' => true],
+        ))->decide();
+
+        $this->assertSame('llm',   $decision->strategy,
+            'gate must not reject LLM when it escapes a ranker head-on gamble');
+        $this->assertSame('right', $decision->move);
+    }
+
+    #[Test]
     public function regression_game_abd38e9b_turn_42_rejects_head_on_down_in_favor_of_safe_left(): void
     {
         // T42: me (4,6) length 5. Ranker top: left (area 36, safe).
