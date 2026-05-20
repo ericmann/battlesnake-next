@@ -98,7 +98,7 @@ final class SafetyTest extends TestCase
     }
 
     #[Test]
-    public function legalMoves_avoids_head_on_with_equal_or_larger(): void
+    public function legalMoves_deprioritises_head_on_with_equal_or_larger(): void
     {
         // Two snakes facing each other. Both length 3.
         $me = $this->snake('me', [
@@ -112,9 +112,14 @@ final class SafetyTest extends TestCase
             ['x' => 5, 'y' => 9],
         ]);
         // If I move 'up', my head goes to (5,6) and the enemy's possible move
-        // 'down' lands them at (5,6) too — head-on with equal length = avoid.
+        // 'down' lands them at (5,6) too — head-on with equal length is a
+        // gamble we don't take when we have plenty of safe alternatives.
+        // Head-on candidates are now included in the list (with a 50%
+        // discount), but must rank below any clearly-safe move with
+        // comparable area.
         $legal = Safety::legalMoves($me, $this->board([$me, $enemy]));
-        $this->assertNotContains('up', $legal);
+        $this->assertNotSame('up', $legal[0],
+            'head-on must never be the top pick when safe alternatives have comparable area');
     }
 
     #[Test]
@@ -753,6 +758,51 @@ final class SafetyTest extends TestCase
         // the kill until depth ran out, capping the score at survived.
         $this->assertGreaterThan(10.0, $score,
             'rollout must credit a kill when the enemy is forced into area < length');
+    }
+
+    #[Test]
+    public function regression_game_70fdbf0d_turn_122_prefers_headon_gamble_over_corner_trap(): void
+    {
+        // Real game (2026-05-20): length-7 self at (1,7), boxed by length-13
+        // Slim at (2,6) and length-16 Warning at (1,9). The only "safe"
+        // move was 'left' to (0,7), but that walked into a corner trap that
+        // killed us 5 turns later (T127 wall-collision). 'right' to (2,7)
+        // was a head-on with the longer Slim — but Slim has 3 legal moves,
+        // so ~67% chance Slim doesn't pick that cell and we live with
+        // room to loiter. The ranker must now include head-on candidates
+        // with a discount so this kind of "gamble vs certain death" choice
+        // is visible.
+        $me = $this->snake('me', [
+            ['x' => 1, 'y' => 7],
+            ['x' => 1, 'y' => 8], ['x' => 2, 'y' => 8], ['x' => 3, 'y' => 8],
+            ['x' => 4, 'y' => 8], ['x' => 4, 'y' => 7], ['x' => 3, 'y' => 7],
+        ], health: 89);
+        $slim = $this->snake('slim', [
+            ['x' => 2, 'y' => 6], ['x' => 3, 'y' => 6], ['x' => 3, 'y' => 5],
+            ['x' => 4, 'y' => 5], ['x' => 4, 'y' => 6], ['x' => 5, 'y' => 6],
+            ['x' => 6, 'y' => 6], ['x' => 6, 'y' => 5], ['x' => 5, 'y' => 5],
+            ['x' => 5, 'y' => 4], ['x' => 4, 'y' => 4], ['x' => 3, 'y' => 4],
+            ['x' => 2, 'y' => 4],
+        ], health: 41);
+        $warn = $this->snake('warn', [
+            ['x' => 1, 'y' => 9], ['x' => 2, 'y' => 9], ['x' => 3, 'y' => 9],
+            ['x' => 4, 'y' => 9], ['x' => 5, 'y' => 9], ['x' => 6, 'y' => 9],
+            ['x' => 7, 'y' => 9], ['x' => 7, 'y' => 8], ['x' => 7, 'y' => 7],
+            ['x' => 7, 'y' => 6], ['x' => 7, 'y' => 5], ['x' => 7, 'y' => 4],
+            ['x' => 7, 'y' => 3], ['x' => 8, 'y' => 3], ['x' => 8, 'y' => 2],
+            ['x' => 8, 'y' => 1],
+        ], health: 99);
+        $board = $this->board([$me, $slim, $warn], food: [['x' => 10, 'y' => 10]]);
+
+        $scored = Safety::legalMovesWithSpace($me, $board);
+
+        // 'right' must be in the candidate list (it's a head-on now
+        // included, no longer silently dropped) and must outrank 'left'
+        // (the certain-corner-trap).
+        $this->assertArrayHasKey('right', $scored,
+            'right must be a candidate even though it is a head-on loss');
+        $this->assertNotSame('left', array_key_first($scored),
+            'left walks into a corner trap; head-on gamble must outrank it');
     }
 
     #[Test]

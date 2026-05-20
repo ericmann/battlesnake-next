@@ -122,8 +122,9 @@ final class Safety
             }
         }
 
-        $candidates = [];
-        $fallback   = null; // tracks the absolute least-bad move if everything is fatal
+        $candidates = []; // raw area (returned to caller / shown to LLM / used by sanity gate)
+        $headOnMoves = []; // direction => true for moves that are head-on losses
+        $headOnFallback = null;
 
         foreach (self::DIRECTIONS as $dir => [$dx, $dy]) {
             $nx = (int) $head['x'] + $dx;
@@ -139,14 +140,9 @@ final class Safety
                 continue;
             }
 
-            // Head-to-head with equal-or-larger snake: fatal or mutual death.
-            if (self::headToHeadLoss($nx, $ny, $me, $board['snakes'])) {
-                // Track as last-resort fallback (it's a coin flip, not certain death)
-                // only if we have nothing better. Don't include in primary list.
-                $fallback ??= $dir;
-                continue;
-            }
-
+            // Compute the would-be area assuming we land here. We do this
+            // even for head-on-loss candidates so the snake can compare a
+            // coin-flip gamble against a death-trap corner.
             $candidates[$dir] = self::areaControl(
                 ['x' => $nx, 'y' => $ny],
                 $myLen,
@@ -155,13 +151,17 @@ final class Safety
                 $width,
                 $height
             );
+
+            if (self::headToHeadLoss($nx, $ny, $me, $board['snakes'])) {
+                $headOnMoves[$dir] = true;
+                $headOnFallback ??= $dir;
+            }
         }
 
         if ($candidates === []) {
-            // Every direction is a wall, body, or head-on loss. Return the
-            // least-bad option (head-on coin flip > guaranteed death). If even
-            // that doesn't exist, default to "up" — we're dead either way.
-            return [($fallback ?? 'up') => 0];
+            // Every direction is a wall or our own body. Default "up" —
+            // dead either way.
+            return [($headOnFallback ?? 'up') => 0];
         }
 
         // Detect "loiter mode": every legal move leads to a region too
@@ -170,11 +170,23 @@ final class Safety
         // our own tail — it vacates every turn, keeping a cyclic loop of
         // breathable space open. Threshold of 1.5× length is the soft point
         // where the body barely fits, with enough room to maneuver.
-        $maxArea = max($candidates);
+        //
+        // Loiter threshold only considers SAFE candidates — we don't want
+        // a discounted head-on candidate to mask a genuine no-escape state.
+        $safeAreas = array_diff_key($candidates, $headOnMoves);
+        $maxArea = $safeAreas === [] ? 0 : max($safeAreas);
         $loiterThreshold = (int) ceil($myLen * 1.5);
         $loiterMode = $maxArea < $loiterThreshold;
 
-        $combined = $candidates; // default: combined = raw area
+        // Initialise the combined score map. Head-on candidates are
+        // discounted up front so a corner-trap "safe" move (small area)
+        // can lose to a head-on gamble (larger area × discount).
+        $combined = [];
+        foreach ($candidates as $dir => $area) {
+            $combined[$dir] = isset($headOnMoves[$dir])
+                ? $area * self::HEAD_ON_DISCOUNT
+                : (float) $area;
+        }
 
         if ($loiterMode) {
             // Loiter: rank by tail proximity (closer to tail = higher), with
@@ -197,8 +209,9 @@ final class Safety
                 // 0.5 per distance unit keeps area as the primary signal
                 // (so a 1-cell pocket beside the tail still loses to a
                 // wide path two cells from the tail) while still breaking
-                // ties on tail proximity.
-                $combined[$dir] = $area - $d * 0.5;
+                // ties on tail proximity. The pre-set $combined already
+                // carries the head-on discount, so subtract from that.
+                $combined[$dir] = $combined[$dir] - $d * 0.5;
             }
         } else {
             // Normal mode: optional food bonus, weighted by hunger and
@@ -229,9 +242,11 @@ final class Safety
                         continue; // food unreachable from this direction
                     }
                     // Bonus shrinks fast with distance — a food at the next
-                    // cell matters far more than one 10 cells away.
+                    // cell matters far more than one 10 cells away. Add to
+                    // the pre-set combined score (already carries the
+                    // head-on discount for head-on candidates).
                     $bonus = $foodWeight * (self::FOOD_BONUS / ($dist + 1.0));
-                    $combined[$dir] = $area + $bonus;
+                    $combined[$dir] = $combined[$dir] + $bonus;
                 }
             }
         }
@@ -255,6 +270,15 @@ final class Safety
      * with low foodWeight sees ~0 bonus.
      */
     private const FOOD_BONUS = 30.0;
+
+    /**
+     * Discount applied to head-on-loss candidates when including them in
+     * the ranking. 0.5 captures the "the enemy has other legal moves they
+     * might pick instead" intuition: a head-on with area 30 ranks like
+     * area 15, so a genuinely safe move with area ≥ 15 still wins, but a
+     * 9-cell death-trap corner loses to a 30-cell head-on gamble.
+     */
+    private const HEAD_ON_DISCOUNT = 0.5;
 
     /**
      * Set of direction names whose landing cell is a food cell, for the
